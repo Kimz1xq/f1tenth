@@ -1,0 +1,24 @@
+vehicle_interface_node:
+  ros__parameters:
+    drive_mode: "sim"
+
+    input_drive_topic: "/control/drive_cmd"
+
+    sim_drive_topic: "/drive"
+
+    real_speed_topic: "/commands/motor/speed"
+    real_servo_topic: "/commands/servo/position"
+
+    safety_stop_topic: "/safety/stop_required"
+    use_safety_stop: true
+
+    watchdog_timeout: 0.5
+    publish_rate: 50.0
+
+    speed_to_erpm_gain: 3000.0
+    speed_to_erpm_offset: 0.0
+
+    servo_center: 0.5
+    servo_gain: 1.0
+    servo_min: 0.0
+    servo_max: 1.0
