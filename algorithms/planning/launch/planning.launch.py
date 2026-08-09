@@ -16,6 +16,7 @@ def generate_launch_description():
     )
 
     params_file = LaunchConfiguration('params_file')
+    waypoint_csv = LaunchConfiguration('waypoint_csv')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -23,12 +24,20 @@ def generate_launch_description():
             default_value=default_params_file,
             description='Path to planning params.yaml'
         ),
+        DeclareLaunchArgument(
+            'waypoint_csv',
+            default_value='/sim_ws/src/planning/waypoints/track02_raceline_safe.csv',
+            description='Optional waypoint/raceline CSV override'
+        ),
 
         Node(
             package='planning',
             executable='waypoint_planner_node',
             name='waypoint_planner_node',
             output='screen',
-            parameters=[params_file]
+            parameters=[
+                params_file,
+                {'waypoint_csv': waypoint_csv}
+            ]
         )
     ])

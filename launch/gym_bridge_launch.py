@@ -35,6 +35,11 @@ def generate_launch_description():
         'sim.yaml'
         )
     config_dict = yaml.safe_load(open(config, 'r'))
+    amcl_config = os.path.join(
+        get_package_share_directory('f1tenth_gym_ros'),
+        'config',
+        'amcl.yaml'
+        )
     has_opp = config_dict['bridge']['ros__parameters']['num_agent'] > 1
     teleop = config_dict['bridge']['ros__parameters']['kb_teleop']
 
@@ -57,16 +62,23 @@ def generate_launch_description():
                     {'topic': 'map'},
                     {'frame_id': 'map'},
                     {'output': 'screen'},
-                    {'use_sim_time': True}]
+                    {'use_sim_time': False}]
+    )
+    amcl_node = Node(
+        package='nav2_amcl',
+        executable='amcl',
+        name='amcl',
+        output='screen',
+        parameters=[amcl_config]
     )
     nav_lifecycle_node = Node(
         package='nav2_lifecycle_manager',
         executable='lifecycle_manager',
         name='lifecycle_manager_localization',
         output='screen',
-        parameters=[{'use_sim_time': True},
+        parameters=[{'use_sim_time': False},
                     {'autostart': True},
-                    {'node_names': ['map_server']}]
+                    {'node_names': ['map_server', 'amcl']}]
     )
     ego_robot_publisher = Node(
         package='robot_state_publisher',
@@ -88,6 +100,7 @@ def generate_launch_description():
     ld.add_action(bridge_node)
     ld.add_action(nav_lifecycle_node)
     ld.add_action(map_server_node)
+    ld.add_action(amcl_node)
     ld.add_action(ego_robot_publisher)
     if has_opp:
         ld.add_action(opp_robot_publisher)

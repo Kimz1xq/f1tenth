@@ -32,6 +32,7 @@ from geometry_msgs.msg import TransformStamped
 from geometry_msgs.msg import Transform
 from geometry_msgs.msg import Quaternion
 from ackermann_msgs.msg import AckermannDriveStamped
+from std_msgs.msg import Bool
 from tf2_ros import TransformBroadcaster
 
 import gym
@@ -65,6 +66,10 @@ class GymBridge(Node):
         self.declare_parameter('sy1')
         self.declare_parameter('stheta1')
         self.declare_parameter('kb_teleop')
+        self.declare_parameter('odom_frame_id', 'odom')
+        self.declare_parameter('ground_truth_odom_topic', '/ground_truth/odom')
+        self.declare_parameter('sim_reset_topic', '/sim_reset_pose')
+        self.declare_parameter('collision_topic', '/ego_racecar/collision')
 
         # check num_agents
         num_agents = self.get_parameter('num_agent').value
@@ -97,6 +102,7 @@ class GymBridge(Node):
         self.angle_max = scan_fov / 2.
         self.angle_inc = scan_fov / scan_beams
         self.ego_namespace = self.get_parameter('ego_namespace').value
+        self.odom_frame_id = self.get_parameter('odom_frame_id').value
         ego_odom_topic = self.ego_namespace + '/' + self.get_parameter('ego_odom_topic').value
         self.scan_distance_to_base_link = self.get_parameter('scan_distance_to_base_link').value
         
@@ -137,6 +143,14 @@ class GymBridge(Node):
         # publishers
         self.ego_scan_pub = self.create_publisher(LaserScan, ego_scan_topic, 10)
         self.ego_odom_pub = self.create_publisher(Odometry, ego_odom_topic, 10)
+        self.ego_ground_truth_odom_pub = self.create_publisher(
+            Odometry,
+            self.get_parameter('ground_truth_odom_topic').value,
+            10)
+        self.ego_collision_pub = self.create_publisher(
+            Bool,
+            self.get_parameter('collision_topic').value,
+            10)
         self.ego_drive_published = False
         if num_agents == 2:
             self.opp_scan_pub = self.create_publisher(LaserScan, opp_scan_topic, 10)
@@ -153,7 +167,7 @@ class GymBridge(Node):
             10)
         self.ego_reset_sub = self.create_subscription(
             PoseWithCovarianceStamped,
-            '/initialpose',
+            self.get_parameter('sim_reset_topic').value,
             self.ego_reset_callback,
             10)
         if num_agents == 2:
@@ -236,6 +250,13 @@ class GymBridge(Node):
     def timer_callback(self):
         ts = self.get_clock().now().to_msg()
 
+        # Publish transforms before sensor messages so TF message filters can
+        # resolve each scan at its exact timestamp.
+        self._publish_odom(ts)
+        self._publish_transforms(ts)
+        self._publish_laser_transforms(ts)
+        self._publish_wheel_transforms(ts)
+
         # pub scans
         scan = LaserScan()
         scan.header.stamp = ts
@@ -247,6 +268,9 @@ class GymBridge(Node):
         scan.range_max = 30.
         scan.ranges = self.ego_scan
         self.ego_scan_pub.publish(scan)
+        collision = Bool()
+        collision.data = self.ego_collision
+        self.ego_collision_pub.publish(collision)
 
         if self.has_opp:
             opp_scan = LaserScan()
@@ -259,12 +283,6 @@ class GymBridge(Node):
             opp_scan.range_max = 30.
             opp_scan.ranges = self.opp_scan
             self.opp_scan_pub.publish(opp_scan)
-
-        # pub tf
-        self._publish_odom(ts)
-        self._publish_transforms(ts)
-        self._publish_laser_transforms(ts)
-        self._publish_wheel_transforms(ts)
 
     def _update_sim_state(self):
         self.ego_scan = list(self.obs['scans'][0])
@@ -283,13 +301,14 @@ class GymBridge(Node):
         self.ego_speed[0] = self.obs['linear_vels_x'][0]
         self.ego_speed[1] = self.obs['linear_vels_y'][0]
         self.ego_speed[2] = self.obs['ang_vels_z'][0]
+        self.ego_collision = bool(self.obs['collisions'][0])
 
         
 
     def _publish_odom(self, ts):
         ego_odom = Odometry()
         ego_odom.header.stamp = ts
-        ego_odom.header.frame_id = 'map'
+        ego_odom.header.frame_id = self.odom_frame_id
         ego_odom.child_frame_id = self.ego_namespace + '/base_link'
         ego_odom.pose.pose.position.x = self.ego_pose[0]
         ego_odom.pose.pose.position.y = self.ego_pose[1]
@@ -303,10 +322,18 @@ class GymBridge(Node):
         ego_odom.twist.twist.angular.z = self.ego_speed[2]
         self.ego_odom_pub.publish(ego_odom)
 
+        ground_truth_odom = Odometry()
+        ground_truth_odom.header.stamp = ts
+        ground_truth_odom.header.frame_id = 'map'
+        ground_truth_odom.child_frame_id = self.ego_namespace + '/base_link'
+        ground_truth_odom.pose = ego_odom.pose
+        ground_truth_odom.twist = ego_odom.twist
+        self.ego_ground_truth_odom_pub.publish(ground_truth_odom)
+
         if self.has_opp:
             opp_odom = Odometry()
             opp_odom.header.stamp = ts
-            opp_odom.header.frame_id = 'map'
+            opp_odom.header.frame_id = self.odom_frame_id
             opp_odom.child_frame_id = self.opp_namespace + '/base_link'
             opp_odom.pose.pose.position.x = self.opp_pose[0]
             opp_odom.pose.pose.position.y = self.opp_pose[1]
@@ -336,7 +363,7 @@ class GymBridge(Node):
         ego_ts = TransformStamped()
         ego_ts.transform = ego_t
         ego_ts.header.stamp = ts
-        ego_ts.header.frame_id = 'map'
+        ego_ts.header.frame_id = self.odom_frame_id
         ego_ts.child_frame_id = self.ego_namespace + '/base_link'
         self.br.sendTransform(ego_ts)
 
@@ -354,7 +381,7 @@ class GymBridge(Node):
             opp_ts = TransformStamped()
             opp_ts.transform = opp_t
             opp_ts.header.stamp = ts
-            opp_ts.header.frame_id = 'map'
+            opp_ts.header.frame_id = self.odom_frame_id
             opp_ts.child_frame_id = self.opp_namespace + '/base_link'
             self.br.sendTransform(opp_ts)
 

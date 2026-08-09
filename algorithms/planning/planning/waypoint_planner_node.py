@@ -43,13 +43,37 @@ class WaypointPlannerNode(Node):
         waypoints = []
 
         with open(csv_path, 'r') as f:
-            reader = csv.DictReader(f)
+            rows = [row for row in csv.reader(f) if row and not row[0].strip().startswith('#')]
 
-            for row in reader:
-                x = float(row['x'])
-                y = float(row['y'])
-                speed = float(row.get('speed', 1.0))
-                waypoints.append((x, y, speed))
+        if not rows:
+            raise RuntimeError('Waypoint CSV is empty.')
+
+        header = [cell.strip().lower() for cell in rows[0]]
+
+        x_names = ['x', 'x_m']
+        y_names = ['y', 'y_m']
+        speed_names = ['speed', 'velocity', 'vx', 'vx_mps']
+
+        x_idx = next((header.index(name) for name in x_names if name in header), None)
+        y_idx = next((header.index(name) for name in y_names if name in header), None)
+
+        if x_idx is not None and y_idx is not None:
+            speed_idx = next((header.index(name) for name in speed_names if name in header), None)
+            data_rows = rows[1:]
+        else:
+            x_idx = 0
+            y_idx = 1
+            speed_idx = 2 if len(rows[0]) > 2 else None
+            data_rows = rows
+
+        for row in data_rows:
+            if len(row) <= max(x_idx, y_idx):
+                continue
+
+            x = float(row[x_idx])
+            y = float(row[y_idx])
+            speed = float(row[speed_idx]) if speed_idx is not None and len(row) > speed_idx else 1.0
+            waypoints.append((x, y, speed))
 
         if len(waypoints) < 2:
             raise RuntimeError('Waypoint CSV must contain at least 2 points.')

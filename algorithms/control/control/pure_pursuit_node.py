@@ -1,44 +1,45 @@
 import math
 
 import rclpy
+from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.time import Time
 
-from nav_msgs.msg import Odometry, Path
 from ackermann_msgs.msg import AckermannDriveStamped
+from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Float64
+from std_srvs.srv import SetBool
+from tf2_ros import Buffer, TransformException, TransformListener
 
 
 class PurePursuitNode(Node):
     def __init__(self):
         super().__init__('pure_pursuit_node')
 
-        # Mode
-        self.declare_parameter('drive_mode', 'sim')  # sim | real
+        self.declare_parameter('drive_mode', 'sim')
+        self.declare_parameter('enabled', False)
 
-        # Topics
-        self.declare_parameter('odom_topic', '/localization/odom')
+        self.declare_parameter('global_frame_id', 'map')
+        self.declare_parameter('base_frame_id', 'ego_racecar/base_link')
+        self.declare_parameter('odom_topic', '/ego_racecar/odom')
         self.declare_parameter('path_topic', '/planning/path')
         self.declare_parameter('sim_drive_topic', '/drive')
         self.declare_parameter('real_speed_topic', '/commands/motor/speed')
         self.declare_parameter('real_servo_topic', '/commands/servo/position')
 
-        # Pure Pursuit params
         self.declare_parameter('wheelbase', 0.33)
-        self.declare_parameter('lookahead_distance', 1.0)
-        self.declare_parameter('max_steering_angle', 0.4189)  # about 24 deg
+        self.declare_parameter('lookahead_distance', 0.70)
+        self.declare_parameter('max_steering_angle', 0.4189)
+        self.declare_parameter('max_path_distance', 1.00)
+        self.declare_parameter('max_heading_error', 1.0472)
+        self.declare_parameter('search_back_points', 8)
+        self.declare_parameter('search_forward_points', 30)
 
-        # Speed params
-        self.declare_parameter('target_speed', 1.0)
-        self.declare_parameter('min_speed', 0.4)
-        self.declare_parameter('max_speed', 2.0)
-        self.declare_parameter('corner_slowdown_gain', 0.5)
+        self.declare_parameter('target_speed', 0.60)
+        self.declare_parameter('min_speed', 0.25)
+        self.declare_parameter('max_speed', 0.80)
+        self.declare_parameter('corner_slowdown_gain', 0.55)
 
-        # PID for speed tracking
-        self.declare_parameter('kp', 1.0)
-        self.declare_parameter('ki', 0.0)
-        self.declare_parameter('kd', 0.05)
-
-        # Real car conversion params
         self.declare_parameter('speed_to_erpm_gain', 3000.0)
         self.declare_parameter('speed_to_erpm_offset', 0.0)
         self.declare_parameter('servo_center', 0.5)
@@ -46,11 +47,15 @@ class PurePursuitNode(Node):
         self.declare_parameter('servo_min', 0.0)
         self.declare_parameter('servo_max', 1.0)
 
-        # Loop
         self.declare_parameter('control_rate', 30.0)
+        self.declare_parameter('odom_timeout', 0.50)
+        self.declare_parameter('path_timeout', 2.00)
 
         self.drive_mode = self.get_parameter('drive_mode').value
+        self.enabled = bool(self.get_parameter('enabled').value)
 
+        self.global_frame_id = self.get_parameter('global_frame_id').value
+        self.base_frame_id = self.get_parameter('base_frame_id').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.path_topic = self.get_parameter('path_topic').value
         self.sim_drive_topic = self.get_parameter('sim_drive_topic').value
@@ -58,253 +63,351 @@ class PurePursuitNode(Node):
         self.real_servo_topic = self.get_parameter('real_servo_topic').value
 
         self.wheelbase = float(self.get_parameter('wheelbase').value)
-        self.lookahead_distance = float(self.get_parameter('lookahead_distance').value)
-        self.max_steering_angle = float(self.get_parameter('max_steering_angle').value)
+        self.lookahead_distance = float(
+            self.get_parameter('lookahead_distance').value)
+        self.max_steering_angle = float(
+            self.get_parameter('max_steering_angle').value)
+        self.max_path_distance = float(
+            self.get_parameter('max_path_distance').value)
+        self.max_heading_error = float(
+            self.get_parameter('max_heading_error').value)
+        self.search_back_points = int(
+            self.get_parameter('search_back_points').value)
+        self.search_forward_points = int(
+            self.get_parameter('search_forward_points').value)
 
         self.target_speed = float(self.get_parameter('target_speed').value)
         self.min_speed = float(self.get_parameter('min_speed').value)
         self.max_speed = float(self.get_parameter('max_speed').value)
-        self.corner_slowdown_gain = float(self.get_parameter('corner_slowdown_gain').value)
+        self.corner_slowdown_gain = float(
+            self.get_parameter('corner_slowdown_gain').value)
 
-        self.kp = float(self.get_parameter('kp').value)
-        self.ki = float(self.get_parameter('ki').value)
-        self.kd = float(self.get_parameter('kd').value)
-
-        self.speed_to_erpm_gain = float(self.get_parameter('speed_to_erpm_gain').value)
-        self.speed_to_erpm_offset = float(self.get_parameter('speed_to_erpm_offset').value)
+        self.speed_to_erpm_gain = float(
+            self.get_parameter('speed_to_erpm_gain').value)
+        self.speed_to_erpm_offset = float(
+            self.get_parameter('speed_to_erpm_offset').value)
         self.servo_center = float(self.get_parameter('servo_center').value)
         self.servo_gain = float(self.get_parameter('servo_gain').value)
         self.servo_min = float(self.get_parameter('servo_min').value)
         self.servo_max = float(self.get_parameter('servo_max').value)
 
+        self.odom_timeout = float(self.get_parameter('odom_timeout').value)
+        self.path_timeout = float(self.get_parameter('path_timeout').value)
         control_rate = float(self.get_parameter('control_rate').value)
+
+        if self.drive_mode not in ('sim', 'real'):
+            raise RuntimeError("drive_mode must be 'sim' or 'real'")
 
         self.current_odom = None
         self.current_path = None
+        self.last_odom_time = None
+        self.last_path_time = None
+        self.nearest_index = None
+        self.last_status_message = None
+        self.last_status_time = None
 
-        self.integral_error = 0.0
-        self.prev_error = 0.0
-        self.prev_time = None
+        self.tf_buffer = Buffer(cache_time=Duration(seconds=5.0))
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.odom_sub = self.create_subscription(
-            Odometry,
-            self.odom_topic,
-            self.odom_callback,
-            10
-        )
-
-        self.path_sub = self.create_subscription(
-            Path,
-            self.path_topic,
-            self.path_callback,
-            10
-        )
+        self.create_subscription(
+            Odometry, self.odom_topic, self.odom_callback, 10)
+        self.create_subscription(
+            Path, self.path_topic, self.path_callback, 10)
 
         self.sim_drive_pub = self.create_publisher(
-            AckermannDriveStamped,
-            self.sim_drive_topic,
-            10
-        )
-
+            AckermannDriveStamped, self.sim_drive_topic, 10)
         self.real_speed_pub = self.create_publisher(
-            Float64,
-            self.real_speed_topic,
-            10
-        )
-
+            Float64, self.real_speed_topic, 10)
         self.real_servo_pub = self.create_publisher(
-            Float64,
-            self.real_servo_topic,
-            10
-        )
+            Float64, self.real_servo_topic, 10)
 
+        self.enable_service = self.create_service(
+            SetBool, '/control/enable', self.enable_callback)
         self.timer = self.create_timer(
-            1.0 / max(control_rate, 1.0),
-            self.control_loop
-        )
+            1.0 / max(control_rate, 1.0), self.control_loop)
 
-        self.get_logger().info('pure_pursuit_node started')
-        self.get_logger().info(f'drive_mode       : {self.drive_mode}')
-        self.get_logger().info(f'odom_topic       : {self.odom_topic}')
-        self.get_logger().info(f'path_topic       : {self.path_topic}')
-        self.get_logger().info(f'sim_drive_topic  : {self.sim_drive_topic}')
-        self.get_logger().info(f'real_speed_topic : {self.real_speed_topic}')
-        self.get_logger().info(f'real_servo_topic : {self.real_servo_topic}')
-
-        if self.drive_mode not in ['sim', 'real']:
-            raise RuntimeError("drive_mode must be 'sim' or 'real'")
+        self.get_logger().info(
+            'Pure Pursuit ready (enabled=%s, pose=%s -> %s, path=%s, '
+            'drive=%s)' % (
+                self.enabled,
+                self.global_frame_id,
+                self.base_frame_id,
+                self.path_topic,
+                self.sim_drive_topic if self.drive_mode == 'sim'
+                else self.real_speed_topic,
+            ))
+        self.get_logger().info(
+            'Start/stop: ros2 service call /control/enable '
+            'std_srvs/srv/SetBool "{data: true|false}"')
 
     def odom_callback(self, msg):
         self.current_odom = msg
+        self.last_odom_time = self.get_clock().now()
 
     def path_callback(self, msg):
+        if not msg.poses:
+            return
+        if self.current_path is None or len(self.current_path.poses) != len(msg.poses):
+            self.nearest_index = None
         self.current_path = msg
+        self.last_path_time = self.get_clock().now()
 
-    def quaternion_to_yaw(self, q):
+    def enable_callback(self, request, response):
+        if not request.data:
+            self.enabled = False
+            self.nearest_index = None
+            self.publish_stop()
+            response.success = True
+            response.message = 'Pure Pursuit stopped'
+            self.get_logger().info(response.message)
+            return response
+
+        problem = self.readiness_problem()
+        if problem is not None:
+            self.enabled = False
+            self.publish_stop()
+            response.success = False
+            response.message = 'Cannot start: ' + problem
+            self.get_logger().error(response.message)
+            return response
+
+        try:
+            x, y, yaw = self.lookup_vehicle_pose()
+        except TransformException as error:
+            self.enabled = False
+            self.publish_stop()
+            response.success = False
+            response.message = 'Cannot start: TF unavailable: ' + str(error)
+            self.get_logger().error(response.message)
+            return response
+
+        self.nearest_index = None
+        _, path_distance, path_heading = self.nearest_path_state(x, y)
+        heading_error = math.atan2(
+            math.sin(path_heading - yaw), math.cos(path_heading - yaw))
+        if path_distance > self.max_path_distance:
+            self.enabled = False
+            self.publish_stop()
+            response.success = False
+            response.message = (
+                'Cannot start: vehicle is %.2f m from path (limit %.2f m)'
+                % (path_distance, self.max_path_distance))
+            self.get_logger().error(response.message)
+            return response
+        if abs(heading_error) > self.max_heading_error:
+            self.enabled = False
+            self.publish_stop()
+            response.success = False
+            response.message = (
+                'Cannot start: heading error is %.1f deg (limit %.1f deg)'
+                % (math.degrees(abs(heading_error)),
+                   math.degrees(self.max_heading_error)))
+            self.get_logger().error(response.message)
+            return response
+
+        self.enabled = True
+        response.success = True
+        response.message = 'Pure Pursuit enabled'
+        self.get_logger().info(response.message)
+        return response
+
+    @staticmethod
+    def quaternion_to_yaw(q):
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         return math.atan2(siny_cosp, cosy_cosp)
 
-    def clamp(self, value, min_value, max_value):
-        return max(min_value, min(value, max_value))
+    @staticmethod
+    def clamp(value, minimum, maximum):
+        return max(minimum, min(value, maximum))
+
+    def lookup_vehicle_pose(self):
+        transform = self.tf_buffer.lookup_transform(
+            self.global_frame_id,
+            self.base_frame_id,
+            Time(),
+            timeout=Duration(seconds=0.03),
+        )
+        translation = transform.transform.translation
+        yaw = self.quaternion_to_yaw(transform.transform.rotation)
+        return translation.x, translation.y, yaw
+
+    def age_seconds(self, stamp):
+        if stamp is None:
+            return float('inf')
+        return (self.get_clock().now() - stamp).nanoseconds * 1e-9
+
+    def readiness_problem(self):
+        if self.current_path is None or not self.current_path.poses:
+            return 'no global path'
+        if self.age_seconds(self.last_path_time) > self.path_timeout:
+            return 'global path is stale'
+        if self.current_odom is None:
+            return 'no odometry'
+        if self.age_seconds(self.last_odom_time) > self.odom_timeout:
+            return 'odometry is stale'
+        return None
+
+    def candidate_indices(self, count):
+        if self.nearest_index is None:
+            return range(count)
+        return [
+            (self.nearest_index + offset) % count
+            for offset in range(-self.search_back_points,
+                                self.search_forward_points + 1)
+        ]
+
+    def nearest_path_state(self, x, y):
+        poses = self.current_path.poses
+        count = len(poses)
+        nearest_idx = min(
+            self.candidate_indices(count),
+            key=lambda idx: math.hypot(
+                poses[idx].pose.position.x - x,
+                poses[idx].pose.position.y - y,
+            ),
+        )
+        nearest_dist = math.hypot(
+            poses[nearest_idx].pose.position.x - x,
+            poses[nearest_idx].pose.position.y - y,
+        )
+        previous = poses[(nearest_idx - 1) % count].pose.position
+        following = poses[(nearest_idx + 1) % count].pose.position
+        path_heading = math.atan2(
+            following.y - previous.y, following.x - previous.x)
+        return nearest_idx, nearest_dist, path_heading
 
     def find_lookahead_point(self, x, y, yaw):
         poses = self.current_path.poses
-
-        if len(poses) == 0:
+        count = len(poses)
+        if count < 2:
             return None
 
-        # nearest waypoint index
-        nearest_idx = 0
-        nearest_dist = float('inf')
+        nearest_idx, nearest_dist, path_heading = self.nearest_path_state(x, y)
+        self.nearest_index = nearest_idx
 
-        for i, pose_stamped in enumerate(poses):
-            px = pose_stamped.pose.position.x
-            py = pose_stamped.pose.position.y
-            dist = math.hypot(px - x, py - y)
+        if nearest_dist > self.max_path_distance:
+            return None
+        heading_error = math.atan2(
+            math.sin(path_heading - yaw), math.cos(path_heading - yaw))
+        if abs(heading_error) > self.max_heading_error:
+            return None
 
-            if dist < nearest_dist:
-                nearest_dist = dist
-                nearest_idx = i
+        travelled = 0.0
+        previous = poses[nearest_idx].pose.position
+        for offset in range(1, count + 1):
+            idx = (nearest_idx + offset) % count
+            point = poses[idx].pose.position
+            travelled += math.hypot(point.x - previous.x, point.y - previous.y)
+            previous = point
 
-        # search forward from nearest point
-        n = len(poses)
+            if travelled < self.lookahead_distance:
+                continue
 
-        for offset in range(n):
-            idx = (nearest_idx + offset) % n
-            pose_stamped = poses[idx]
-
-            px = pose_stamped.pose.position.x
-            py = pose_stamped.pose.position.y
-
-            dx = px - x
-            dy = py - y
-
-            # Transform map point to vehicle frame
+            dx = point.x - x
+            dy = point.y - y
             x_car = math.cos(yaw) * dx + math.sin(yaw) * dy
             y_car = -math.sin(yaw) * dx + math.cos(yaw) * dy
-
-            dist = math.hypot(dx, dy)
-
-            if x_car > 0.0 and dist >= self.lookahead_distance:
-                return x_car, y_car, dist
+            if x_car > 0.0:
+                return x_car, y_car, math.hypot(dx, dy), nearest_dist
 
         return None
 
     def compute_steering(self, x_car, y_car, lookahead_dist):
         if lookahead_dist < 1e-6:
             return 0.0
-
         curvature = 2.0 * y_car / (lookahead_dist ** 2)
         steering = math.atan(self.wheelbase * curvature)
-
         return self.clamp(
-            steering,
-            -self.max_steering_angle,
-            self.max_steering_angle
-        )
+            steering, -self.max_steering_angle, self.max_steering_angle)
 
-    def compute_pid_speed(self, steering):
-        now = self.get_clock().now().nanoseconds * 1e-9
-
-        current_speed = 0.0
-        if self.current_odom is not None:
-            current_speed = self.current_odom.twist.twist.linear.x
-
+    def compute_speed(self, steering):
         steer_ratio = abs(steering) / max(self.max_steering_angle, 1e-6)
-        desired_speed = self.target_speed * (1.0 - self.corner_slowdown_gain * steer_ratio)
-        desired_speed = self.clamp(desired_speed, self.min_speed, self.max_speed)
-
-        error = desired_speed - current_speed
-
-        if self.prev_time is None:
-            dt = 0.0
-        else:
-            dt = max(now - self.prev_time, 1e-6)
-
-        if dt > 0.0:
-            self.integral_error += error * dt
-            derivative = (error - self.prev_error) / dt
-        else:
-            derivative = 0.0
-
-        pid_output = (
-            self.kp * error +
-            self.ki * self.integral_error +
-            self.kd * derivative
-        )
-
-        cmd_speed = current_speed + pid_output
-        cmd_speed = self.clamp(cmd_speed, self.min_speed, self.max_speed)
-
-        self.prev_error = error
-        self.prev_time = now
-
-        return cmd_speed
+        speed = self.target_speed * (
+            1.0 - self.corner_slowdown_gain * steer_ratio)
+        return self.clamp(speed, self.min_speed, self.max_speed)
 
     def publish_drive(self, speed, steering):
         if self.drive_mode == 'sim':
             msg = AckermannDriveStamped()
             msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = 'base_link'
+            msg.header.frame_id = self.base_frame_id
             msg.drive.speed = float(speed)
             msg.drive.steering_angle = float(steering)
             self.sim_drive_pub.publish(msg)
+            return
 
-        else:
-            speed_msg = Float64()
-            servo_msg = Float64()
-
-            speed_msg.data = self.speed_to_erpm_gain * speed + self.speed_to_erpm_offset
-
-            servo = self.servo_center + self.servo_gain * steering
-            servo_msg.data = self.clamp(servo, self.servo_min, self.servo_max)
-
-            self.real_speed_pub.publish(speed_msg)
-            self.real_servo_pub.publish(servo_msg)
+        speed_msg = Float64()
+        servo_msg = Float64()
+        speed_msg.data = (
+            self.speed_to_erpm_gain * speed + self.speed_to_erpm_offset)
+        servo_msg.data = self.clamp(
+            self.servo_center + self.servo_gain * steering,
+            self.servo_min,
+            self.servo_max,
+        )
+        self.real_speed_pub.publish(speed_msg)
+        self.real_servo_pub.publish(servo_msg)
 
     def publish_stop(self):
         if self.drive_mode == 'sim':
             msg = AckermannDriveStamped()
             msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = self.base_frame_id
             msg.drive.speed = 0.0
             msg.drive.steering_angle = 0.0
             self.sim_drive_pub.publish(msg)
-        else:
-            speed_msg = Float64()
-            servo_msg = Float64()
-            speed_msg.data = 0.0
-            servo_msg.data = self.servo_center
-            self.real_speed_pub.publish(speed_msg)
-            self.real_servo_pub.publish(servo_msg)
-
-    def control_loop(self):
-        if self.current_odom is None or self.current_path is None:
             return
 
-        pose = self.current_odom.pose.pose
-        x = pose.position.x
-        y = pose.position.y
-        yaw = self.quaternion_to_yaw(pose.orientation)
+        speed_msg = Float64()
+        servo_msg = Float64()
+        speed_msg.data = 0.0
+        servo_msg.data = self.servo_center
+        self.real_speed_pub.publish(speed_msg)
+        self.real_servo_pub.publish(servo_msg)
 
-        lookahead = self.find_lookahead_point(x, y, yaw)
+    def warn_throttled(self, message):
+        now = self.get_clock().now()
+        if (message != self.last_status_message or
+                self.last_status_time is None or
+                (now - self.last_status_time).nanoseconds > 2_000_000_000):
+            self.get_logger().warn(message)
+            self.last_status_message = message
+            self.last_status_time = now
 
-        if lookahead is None:
+    def control_loop(self):
+        if not self.enabled:
             self.publish_stop()
             return
 
-        x_car, y_car, lookahead_dist = lookahead
+        problem = self.readiness_problem()
+        if problem is not None:
+            self.publish_stop()
+            self.warn_throttled('Safety stop: ' + problem)
+            return
 
+        try:
+            x, y, yaw = self.lookup_vehicle_pose()
+        except TransformException as error:
+            self.publish_stop()
+            self.warn_throttled('Safety stop: TF unavailable: ' + str(error))
+            return
+
+        lookahead = self.find_lookahead_point(x, y, yaw)
+        if lookahead is None:
+            self.publish_stop()
+            self.warn_throttled(
+                'Safety stop: no valid lookahead point or vehicle too far from path')
+            return
+
+        x_car, y_car, lookahead_dist, _ = lookahead
         steering = self.compute_steering(x_car, y_car, lookahead_dist)
-        speed = self.compute_pid_speed(steering)
-
-        self.publish_drive(speed, steering)
+        self.publish_drive(self.compute_speed(steering), steering)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = PurePursuitNode()
-
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

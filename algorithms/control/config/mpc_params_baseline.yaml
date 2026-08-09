@@ -1,0 +1,41 @@
+linear_mpc_node:
+  ros__parameters:
+    enabled: false
+    solve_when_disabled: true
+
+    global_frame_id: "map"
+    base_frame_id: "ego_racecar/base_link"
+    odom_topic: "/ego_racecar/odom"
+    path_topic: "/planning/path"
+    drive_topic: "/drive"
+    collision_topic: "/ego_racecar/collision"
+
+    wheelbase: 0.33
+    horizon_steps: 12
+    dt: 0.10
+    control_rate: 10.0
+
+    target_speed: 0.55
+    min_reference_speed: 0.30
+    max_speed: 0.80
+    max_acceleration: 1.50
+    max_steering_angle: 0.4189
+    max_steering_rate: 1.20
+    corner_slowdown_gain: 0.35
+
+    q_x: 20.0
+    q_y: 20.0
+    q_speed: 3.0
+    q_yaw: 8.0
+    qf_scale: 1.5
+    r_acceleration: 0.20
+    r_steering: 1.00
+    rd_acceleration: 0.50
+    rd_steering: 8.00
+
+    max_path_distance: 0.80
+    max_heading_error: 1.0472
+    odom_timeout: 0.50
+    path_timeout: 2.00
+    search_back_points: 5
+    search_forward_points: 30

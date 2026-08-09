@@ -1,8 +1,11 @@
 pure_pursuit_node:
   ros__parameters:
     drive_mode: "sim"
+    enabled: false
 
-    odom_topic: "/localization/odom"
+    global_frame_id: "map"
+    base_frame_id: "ego_racecar/base_link"
+    odom_topic: "/ego_racecar/odom"
     path_topic: "/planning/path"
 
     sim_drive_topic: "/drive"
@@ -11,17 +14,18 @@ pure_pursuit_node:
     real_servo_topic: "/commands/servo/position"
 
     wheelbase: 0.33
-    lookahead_distance: 1.0
+    lookahead_distance: 0.70
     max_steering_angle: 0.4189
+    max_path_distance: 1.00
+    max_heading_error: 1.0472  # 60 deg
+    search_back_points: 8
+    search_forward_points: 30
 
-    target_speed: 1.0
-    min_speed: 0.4
-    max_speed: 2.0
-    corner_slowdown_gain: 0.5
-
-    kp: 1.0
-    ki: 0.0
-    kd: 0.05
+    # First closed-loop test: deliberately conservative.
+    target_speed: 0.60
+    min_speed: 0.25
+    max_speed: 0.80
+    corner_slowdown_gain: 0.55
 
     speed_to_erpm_gain: 3000.0
     speed_to_erpm_offset: 0.0
@@ -32,3 +36,5 @@ pure_pursuit_node:
     servo_max: 1.0
 
     control_rate: 30.0
+    odom_timeout: 0.50
+    path_timeout: 2.00

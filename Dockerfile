@@ -52,7 +52,10 @@ RUN python3 -m pip install --no-cache-dir \
     pyglet==1.4.11 \
     cloudpickle==1.6.0 \
     future \
-    transforms3d
+    transforms3d \
+    setuptools==69.5.1 \
+    cvxpy==1.3.2 \
+    osqp==0.6.3
 
 RUN git clone https://github.com/f1tenth/f1tenth_gym
 RUN cd f1tenth_gym && \
@@ -72,6 +75,8 @@ ENTRYPOINT ["/bin/bash"]
 # 추가 패키지
 RUN apt-get update && apt-get install -y \
     ros-humble-slam-toolbox \
+    ros-humble-nav2-amcl \
+    ros-humble-nav2-rviz-plugins \
     ros-humble-nav2-map-server \
     ros-humble-nav2-lifecycle-manager \
     ros-humble-ackermann-msgs \

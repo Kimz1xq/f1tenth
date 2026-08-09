@@ -1,6 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 from ament_index_python.packages import get_package_share_directory
@@ -16,7 +17,9 @@ def generate_launch_description():
     )
 
     params_file = LaunchConfiguration('params_file')
+    mpc_params_file = LaunchConfiguration('mpc_params_file')
     drive_mode = LaunchConfiguration('drive_mode')
+    controller = LaunchConfiguration('controller')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -30,6 +33,18 @@ def generate_launch_description():
             default_value='sim',
             description='Drive output mode: sim or real'
         ),
+        DeclareLaunchArgument(
+            'controller',
+            default_value='pure_pursuit',
+            description='Controller: pure_pursuit or mpc'
+        ),
+        DeclareLaunchArgument(
+            'mpc_params_file',
+            default_value=os.path.join(
+                get_package_share_directory('control'), 'config',
+                'mpc_params.yaml'),
+            description='Path to Linear MPC params.yaml'
+        ),
 
         Node(
             package='control',
@@ -39,6 +54,20 @@ def generate_launch_description():
             parameters=[
                 params_file,
                 {'drive_mode': drive_mode}
-            ]
+            ],
+            condition=IfCondition(PythonExpression([
+                "'", controller, "' == 'pure_pursuit'"
+            ]))
+        ),
+
+        Node(
+            package='control',
+            executable='linear_mpc_node',
+            name='linear_mpc_node',
+            output='screen',
+            parameters=[mpc_params_file],
+            condition=IfCondition(PythonExpression([
+                "'", controller, "' == 'mpc'"
+            ]))
         )
     ])

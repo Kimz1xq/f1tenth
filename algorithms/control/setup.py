@@ -36,6 +36,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pure_pursuit_node = control.pure_pursuit_node:main',
+            'linear_mpc_node = control.linear_mpc_node:main',
         ],
     },
 )

@@ -36,22 +36,25 @@ bridge:
 
     # transform related
     scan_distance_to_base_link: 0.275
+    odom_frame_id: 'odom'
+    ground_truth_odom_topic: '/ground_truth/odom'
+    sim_reset_topic: '/sim_reset_pose'
     
     # laserscan parameters
     scan_fov: 4.7
     scan_beams: 1080
 
     # map parameters
-    map_path: '/sim_ws/src/f1tenth_gym_ros/maps/levine'
+    map_path: '/sim_ws/src/f1tenth_gym_ros/maps/track02'
     map_img_ext: '.png'
 
     # opponent parameters
     num_agent: 1
 
     # ego starting pose on map
-    sx: 0.0
-    sy: 0.0
-    stheta: 0.0
+    sx: 0.2985
+    sy: 0.5926
+    stheta: -0.6205
 
     # opp starting pose on map
     sx1: 2.0

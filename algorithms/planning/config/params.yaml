@@ -1,6 +1,6 @@
 waypoint_planner_node:
   ros__parameters:
-    waypoint_csv: "/sim_ws/src/planning/waypoints/waypoints.csv"
+    waypoint_csv: "/sim_ws/src/planning/waypoints/track02_raceline_safe.csv"
     path_topic: "/planning/path"
     marker_topic: "/planning/markers"
     frame_id: "map"
