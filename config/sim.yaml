@@ -39,14 +39,16 @@ bridge:
     odom_frame_id: 'odom'
     ground_truth_odom_topic: '/ground_truth/odom'
     sim_reset_topic: '/sim_reset_pose'
+    topic_publish_rate: 40.0
     
     # laserscan parameters
     scan_fov: 4.7
     scan_beams: 1080
 
     # map parameters
-    map_path: '/sim_ws/src/f1tenth_gym_ros/maps/track02'
-    map_img_ext: '.png'
+    map_path: '/sim_ws/src/f1tenth_gym_ros/maps/track03'
+    map_img_ext: '.pgm'
+    friction_mu: 1.0489
 
     # opponent parameters
     num_agent: 1
@@ -63,3 +65,23 @@ bridge:
 
     # teleop
     kb_teleop: True
+
+    # Static-obstacle experiments. A negative seed chooses fresh randomness
+    # for every placement; use a non-negative seed for reproducible runs.
+    random_obstacles_enabled: false
+    random_obstacle_count: 2
+    random_obstacle_seed: -1
+    randomize_obstacles_on_reset: false
+    randomize_obstacles_on_lap: true
+    obstacle_path_csv: '/sim_ws/src/planning/waypoints/track03_centerline.csv'
+    obstacle_length: 0.20
+    obstacle_width: 0.12
+    obstacle_height: 0.20
+    obstacle_lateral_offset: 0.16
+    obstacle_start_clearance: 1.50
+    obstacle_min_spacing: 3.00
+    obstacle_passage_offset: 0.18
+    obstacle_passage_radius: 0.17
+    obstacle_marker_topic: '/simulation/obstacles_ground_truth'
+    vehicle_length: 0.58
+    vehicle_width: 0.31

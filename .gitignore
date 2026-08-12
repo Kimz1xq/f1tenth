@@ -139,6 +139,9 @@ log/
 algorithms/control/results/mpc_bags/
 results/*_bag/
 
+# Raw experiment outputs. Keep only reviewed plots/tables in results/.
+runs/
+
 # Local map-editing sources and reference documents
 *.xcf
 자율주행 모형차 F1Tenth 사용자 매뉴얼.pdf

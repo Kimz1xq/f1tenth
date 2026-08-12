@@ -13,7 +13,9 @@ class WaypointPlannerNode(Node):
     def __init__(self):
         super().__init__('waypoint_planner_node')
 
-        self.declare_parameter('waypoint_csv', '/sim_ws/src/planning/waypoints/waypoints.csv')
+        self.declare_parameter(
+            'waypoint_csv',
+            '/sim_ws/src/planning/waypoints/track03_raceline.csv')
         self.declare_parameter('path_topic', '/planning/path')
         self.declare_parameter('marker_topic', '/planning/markers')
         self.declare_parameter('frame_id', 'map')
@@ -72,7 +74,10 @@ class WaypointPlannerNode(Node):
 
             x = float(row[x_idx])
             y = float(row[y_idx])
-            speed = float(row[speed_idx]) if speed_idx is not None and len(row) > speed_idx else 1.0
+            speed = (
+                float(row[speed_idx])
+                if speed_idx is not None and len(row) > speed_idx
+                else 1.0)
             waypoints.append((x, y, speed))
 
         if len(waypoints) < 2:
@@ -160,9 +165,10 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

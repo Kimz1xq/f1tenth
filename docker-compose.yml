@@ -15,7 +15,6 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-version: '3'
 services:
   sim:
     image: f1tenth_gym_ros
@@ -25,6 +24,7 @@ services:
       - ./algorithms/localization:/sim_ws/src/localization
       - ./algorithms/planning:/sim_ws/src/planning
       - ./algorithms/control:/sim_ws/src/control
+      - ./algorithms/f1tenth_bringup:/sim_ws/src/f1tenth_bringup
       - ./maps:/root/maps
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     environment:

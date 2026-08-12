@@ -1,120 +1,116 @@
 # F1TENTH ROS 2 Humble
 
-실차에서 녹화하고 SLAM Toolbox로 생성한 `track02` 맵을 F1TENTH Gym에 적용한 ROS 2 Humble 자율주행 스택입니다. Docker 기반 시뮬레이터, AMCL 위치 추정, raceline 전역 경로, Pure Pursuit, Linear MPC와 반복 실험 도구를 포함합니다.
+실차 SLAM 맵을 F1TENTH Gym에서 반복 검증하기 위한 ROS 2 Humble 스택입니다.
+AMCL, raceline, LaserScan 기반 정적 장애물 회피, Pure Pursuit, Linear MPC를 한
+launch에서 선택해 실행합니다.
 
-## 구성
+## 실행 구조
 
 ```text
-track02 map + LaserScan
-          │
-          ├─ AMCL ────────────────┐
-          │   (map → odom TF)       │
-safe raceline → /planning/path          │
-          │                              ▼
-          └─ Pure Pursuit / Linear MPC → /drive → F1TENTH Gym
+map + scan -> AMCL -> map→odom→base_link
+raceline  -> local obstacle planner -> /planning/path
+                                      -> controller -> /drive -> Gym
 ```
 
-| 영역 | 현재 구현 |
+실행 설정의 기준 파일은 세 개뿐입니다.
+
+| 바꿀 항목 | 수정할 파일 |
 |---|---|
-| Simulation | F1TENTH Gym, Docker Compose, RViz2 |
-| Localization | Nav2 AMCL, `map → odom → ego_racecar/base_link` |
-| Global path | `track02_raceline_safe.csv` 순환 경로 |
-| Control | Pure Pursuit, Linear Time-Varying MPC (CVXPY + OSQP) |
-| Evaluation | CTE, lap, collision, solver time CSV/plot |
+| 맵·시작 자세·경로·기본 마찰계수 | `config/tracks.yaml` |
+| MPC 공통값·튜닝 프로필 | `algorithms/control/config/mpc_params.yaml` |
+| 장애물 검출·회피 파라미터 | `algorithms/planning/config/params.yaml` |
 
-> 현재 MPC는 정적 raceline 추종 단계입니다. 미등록 장애물 회피를 위한 local planner와 AEB는 아직 포함되지 않았습니다.
+`sim.yaml`은 Gym 단독 실행의 기본값입니다. 일반 실험에서는 복사하거나 매번
+수정하지 말고 아래 launch 인자로 선택합니다.
 
-## 빠른 시작
-
-### 1. 준비
-
-- Ubuntu + Docker Engine + Docker Compose
-- X11 GUI(RViz2)
-- NVIDIA GPU는 필수가 아니며, 기본 Compose는 software rendering을 사용합니다.
+## 최초 준비와 빌드
 
 ```bash
 git clone https://github.com/Kimz1xq/f1tenth.git
 cd f1tenth
-xhost +local:docker
+xhost +SI:localuser:root
 docker compose up -d --build
-```
-
-컨테이너 접속:
-
-```bash
 docker compose exec sim bash
-cd /sim_ws
-source /opt/ros/humble/setup.bash
-source install/setup.bash
 ```
 
-코드를 수정한 뒤에는 컨테이너에서 다시 빌드합니다.
+컨테이너 안에서:
 
 ```bash
 cd /sim_ws
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select \
-  f1tenth_gym_ros localization planning control vehicle_interface f1tenth_bringup
+  f1tenth_gym_ros localization planning control f1tenth_bringup
 source install/setup.bash
 ```
 
-### 2. 시뮬레이터 + AMCL
+코드를 수정하지 않았다면 매 실행마다 빌드할 필요는 없습니다.
 
-첫 번째 컨테이너 터미널:
+## 일반 실행
+
+컨테이너에서 다음 한 줄로 Gym, RViz, AMCL, planning, controller를 모두 실행합니다.
 
 ```bash
-source /opt/ros/humble/setup.bash
-source /sim_ws/install/setup.bash
-ros2 launch f1tenth_gym_ros gym_bridge_launch.py
+ros2 launch f1tenth_bringup autonomy.launch.py \
+  track:=track03 controller:=mpc mpc_profile:=speed_0.55 \
+  friction:=auto obstacles:=false
 ```
 
-RViz2에서 `2D Pose Estimate`로 차량의 초기 위치와 방향을 지정합니다. 설정된 기본 맵은 `maps/track02.png` + `maps/track02.yaml`입니다.
-
-### 3. Raceline 게시
-
-두 번째 터미널:
+주요 선택 예시:
 
 ```bash
-docker compose exec sim bash
-source /opt/ros/humble/setup.bash
-source /sim_ws/install/setup.bash
-ros2 launch planning planning.launch.py \
-  waypoint_csv:=/sim_ws/src/planning/waypoints/track02_raceline_safe.csv
+# AMCL과 경로만 확인
+ros2 launch f1tenth_bringup autonomy.launch.py track:=track03 controller:=none
+
+# Pure Pursuit 비교
+ros2 launch f1tenth_bringup autonomy.launch.py \
+  track:=track03 controller:=pure_pursuit
+
+# 다른 맵·MPC 프로필·저마찰 조건
+ros2 launch f1tenth_bringup autonomy.launch.py \
+  track:=track02 controller:=mpc mpc_profile:=baseline friction:=0.80
+
+# 매번 새로운 위치에 랜덤 장애물 2개를 생성
+ros2 launch f1tenth_bringup autonomy.launch.py \
+  track:=track03 controller:=mpc mpc_profile:=speed_0.55 obstacles:=true
 ```
 
-### 4. 컨트롤러 실행
-
-Pure Pursuit:
+속도별 파일을 만들지 않고 `speed_<m/s>`의 숫자를 목표·최대속도로 사용합니다.
 
 ```bash
-ros2 launch control control.launch.py controller:=pure_pursuit
-ros2 service call /control/enable std_srvs/srv/SetBool "{data: true}"
+ros2 launch f1tenth_bringup autonomy.launch.py \
+  track:=track03 controller:=mpc mpc_profile:=speed_0.85 obstacles:=true
+
+ros2 launch f1tenth_bringup autonomy.launch.py \
+  track:=track03 controller:=mpc mpc_profile:=speed_2 obstacles:=false
 ```
 
-Linear MPC:
+컨트롤러는 항상 정지 상태로 시작합니다. RViz 정합, TF, local path, MPC 출력을
+확인한 뒤 주행을 허용합니다.
 
 ```bash
-ros2 launch control control.launch.py controller:=mpc
-```
-
-MPC는 기본적으로 disabled dry-run 상태입니다. `/drive` 정지 명령과 제안 제어량을 먼저 확인한 후 주행을 허용하세요.
-
-```bash
-ros2 topic echo /drive --once
+ros2 topic echo /planning/local_status
 ros2 topic echo /mpc/proposed_drive --once
 ros2 topic echo /mpc/solve_time_ms
 ros2 service call /control/enable std_srvs/srv/SetBool "{data: true}"
 ```
 
-즉시 정지:
+정지:
 
 ```bash
 ros2 service call /control/enable std_srvs/srv/SetBool "{data: false}"
 ```
 
-세부 모델, 파라미터, 튜닝 순서는 [MPC 가이드](algorithms/control/MPC_GUIDE.md)를 참고하세요.
+## 권장 검증 순서
 
-## 상태 확인
+1. `controller:=none obstacles:=false`로 맵, scan, AMCL을 확인합니다.
+2. `map → odom → ego_racecar/base_link → ego_racecar/laser` TF를 확인합니다.
+3. `/planning/global_path`와 `/planning/path`가 도로 안에 있는지 확인합니다.
+4. Pure Pursuit로 기준 기록을 얻습니다.
+5. MPC dry-run에서 제안 조향과 solver 시간을 확인한 뒤 1랩을 주행합니다.
+6. 같은 시작 자세·맵·마찰계수로 MPC 프로필을 비교합니다.
+7. 마지막에 장애물을 켜고 seed별 충돌·최소 여유거리·랩타임을 비교합니다.
+
+확인 명령:
 
 ```bash
 ros2 topic hz /scan
@@ -124,79 +120,97 @@ ros2 run tf2_tools view_frames
 rqt_graph
 ```
 
-정상 TF 체인:
+## 장애물 실험
 
-```text
-map → odom → ego_racecar/base_link → ego_racecar/laser
+실행 중 장애물을 새로 배치하거나 제거할 수 있습니다.
+
+```bash
+ros2 service call /simulation/randomize_obstacles std_srvs/srv/Trigger "{}"
+ros2 topic echo /planning/local_status
+ros2 topic echo /safety/emergency_stop
+
+ros2 service call /simulation/clear_obstacles std_srvs/srv/Trigger "{}"
 ```
 
-## 반복 실험
+`/simulation/obstacles_ground_truth`는 시각화·평가 전용입니다. 회피 경로는 이
+정답 토픽이 아니라 `/scan`과 `/map`으로 계산합니다. MPC는 장애물을 직접 검출하는
+모듈이 아니라 local planner가 만든 회피 경로를 차량 제약 안에서 추종합니다.
+LaserScan은 0.08초 TF 대기 큐를 거쳐 측정 timestamp의 좌표로 변환하며, 같은
+위치에서 3프레임 연속 검출된 클러스터만 장애물로 확정해 벽·TF 오차에 의한
+단발성 노란 Marker를 억제합니다.
+`obstacles:=true`에서는 시작할 때와 한 랩을 완료할 때마다 새로운 난수 seed로
+장애물 2개를 자동 재배치합니다. 재현 실험이 필요하면 `sim.yaml`의
+`random_obstacle_seed`를 0 이상의 고정값으로 설정하면 이후 랩에서 seed가 1씩
+증가합니다. 자동 재배치를 끄려면 `randomize_obstacles_on_lap`을 `false`로
+설정합니다.
 
-3랩 closed-loop 테스트:
+## 실험 결과 관리
+
+원시 CSV와 rosbag은 Git에 넣지 않고 `runs/` 아래에 저장합니다.
+
+```text
+runs/<track>/<controller>_<profile>_mu<friction>_seed<seed>/
+```
+
+예:
 
 ```bash
 python3 /sim_ws/src/control/scripts/closed_loop_test.py \
-  --duration 210 \
-  --laps 3.0 \
-  --max-error 0.30 \
-  --output /sim_ws/src/control/results/track02_mpc_3laps.csv
+  --duration 210 --laps 3.0 --max-error 0.30 \
+  --output /sim_ws/src/f1tenth_gym_ros/runs/track03/mpc_tuned_v2_mu1.0489_seed42.csv
 ```
 
-ROS bag 녹화 예시:
+Git에는 최종 비교 그래프와 요약 표만 `results/`에 남깁니다. 기존 track02 원본
+CSV·bag·중간 경로·예전 맵은 손실 없이 다음 위치에 보관했습니다.
 
-```bash
-ros2 bag record \
-  /scan /ego_racecar/odom /ground_truth/odom \
-  /amcl_pose /particle_cloud /tf /tf_static \
-  /planning/path /drive \
-  /mpc/reference_path /mpc/predicted_path /mpc/solve_time_ms \
-  /ego_racecar/collision \
-  -o /sim_ws/src/control/results/mpc_bags/track02_run
+```text
+/home/kimi/f1tenth_experiment_archive/2026-08-09_track02/
 ```
 
-bag DB3는 크기가 크므로 Git에는 포함하지 않습니다. CSV와 비교 그래프는 `algorithms/control/results/`, `results/`에 있습니다.
+## 새 맵 또는 튜닝 추가
 
-## track02 측정 결과
+새 맵은 다음 네 파일만 최종본으로 유지합니다.
 
-| Controller | Lap [s] | Mean CTE [m] | P95 CTE [m] | Max CTE [m] | Collision |
-|---|---:|---:|---:|---:|---:|
-| Pure Pursuit safe | 48.45 | 0.068 | 0.116 | 0.164 | 0 |
-| MPC baseline | 44.13 | 0.117 | 0.211 | 0.241 | 0 |
-| MPC tuned v1 | 42.78 | 0.102 | 0.240 | 0.311 | 0 |
-| MPC tuned v2 | 56.56 | 0.070 | 0.111 | 0.140 | 0 |
+```text
+maps/<track>.<pgm|png>
+maps/<track>.yaml
+algorithms/planning/waypoints/<track>_centerline.csv
+algorithms/planning/waypoints/<track>_raceline.csv
+```
 
-MPC tuned v2의 solver time은 mean 14.73ms, p95 19.81ms, max 34.33ms였습니다. 현재 파라미터는 최대 속도보다 경로 오차와 안정성에 중점을 둔 보수적 설정입니다.
+경로 검증 후 `config/tracks.yaml`에 항목 하나를 추가하면 됩니다. 맵마다 launch나
+MPC 설정 파일을 복사하지 않습니다. 속도는 YAML 항목을 추가하지 않고
+`mpc_profile:=speed_<m/s>`로 실행할 때 지정합니다.
+
+## 현재 기준 성능
+
+track02, 장애물 없음, 저속 1랩 기준입니다.
+
+| Controller | Lap [s] | Mean CTE [m] | P95 CTE [m] | Collision |
+|---|---:|---:|---:|---:|
+| Pure Pursuit safe | 48.45 | 0.068 | 0.116 | 0 |
+| MPC baseline | 44.13 | 0.117 | 0.211 | 0 |
+| MPC tuned v1 | 42.78 | 0.102 | 0.240 | 0 |
+| MPC tuned v2 | 56.56 | 0.070 | 0.111 | 0 |
 
 ![Controller comparison](results/track02_controller_comparison.png)
 
-## 맵 교체
-
-1. 맵 이미지(`.pgm` 또는 `.png`)와 YAML을 `maps/`에 놓습니다.
-2. YAML의 `image`, `resolution`, `origin`, occupancy threshold를 확인합니다.
-3. `config/sim.yaml`의 `map_path`, `map_img_ext`를 수정합니다.
-4. 시뮬레이터를 재시작하고 맵과 LaserScan이 일치하는지 확인합니다.
+세부 모델과 파라미터 의미는
+[MPC 가이드](algorithms/control/MPC_GUIDE.md)를 참고하세요.
 
 ## 주요 폴더
 
 ```text
-algorithms/localization/       위치 추정 패키지
-algorithms/planning/           raceline 게시·생성·검증
-algorithms/control/            Pure Pursuit·Linear MPC·평가 스크립트
-algorithms/vehicle_interface/  시뮬레이터/실차 제어 인터페이스
-config/                        Gym·AMCL 설정
-maps/                          track02 포함 occupancy map
-launch/                        Gym bridge·RViz2 런치
-results/                       컨트롤러 비교 결과
+config/tracks.yaml             맵/경로 선택 목록
+maps/                          실행 가능한 최종 맵
+algorithms/planning/waypoints/ 실행 가능한 최종 경로
+algorithms/planning/           전역 경로와 장애물 회피
+algorithms/control/            Pure Pursuit, Linear MPC, 평가 도구
+algorithms/f1tenth_bringup/    전체 스택 단일 launch
+results/                       검토 완료한 비교 자료
+runs/                          원시 실험 결과(Git 제외)
 ```
-
-## 다음 개발 단계
-
-- 곡률·가속·감속 제약을 반영한 velocity profile
-- 랜덤 정적 장애물 2개를 위한 simulator obstacle manager
-- LaserScan 기반 local planner + MPC local trajectory tracking
-- iTTC 기반 AEB 및 안전 오버라이드
-- AMCL/ground truth 오차, lap time, clearance, collision 통합 벤치마크
 
 ## License
 
-[MIT License](LICENSE). 이 저장소는 F1TENTH Gym ROS 코드를 ROS 2 Humble 환경과 본 프로젝트에 맞게 확장한 버전입니다.
+[MIT License](LICENSE)

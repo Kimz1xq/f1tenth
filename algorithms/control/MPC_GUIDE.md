@@ -1,92 +1,88 @@
-# track02 Linear MPC 사용법
+# Linear MPC 가이드
 
-이 구현은 MIT 라이선스의 F1TENTH Lab 7 MPC 예제에서 kinematic bicycle
-model과 QP 구조를 참고하고, 현재 ROS 2/AMCL/raceline 구성에 맞게 수정했다.
+현재 controller는 F1TENTH Lab 7의 kinematic bicycle model과 QP 구조를 참고해
+ROS 2, AMCL, local path 환경에 맞춘 Linear Time-Varying MPC입니다.
 
+- 참고 코드: <https://github.com/jasonf27/f1tenth_autonomous_anonymous/tree/main/lab-7-model-predictive-control-autonomous-anonymous-main>
 - 상태: `[map_x, map_y, speed, yaw]`
 - 입력: `[acceleration, steering_angle]`
 - solver: CVXPY + OSQP
-- 제어 주기: 10 Hz
-- horizon: 16 step × 0.1 s = 1.6 s
-- 기본 상태: disabled. disabled 상태에서도 해와 예측 경로만 계산하며 `/drive`에는
-  항상 정지 명령을 보낸다.
-- 안전 정지: collision, stale odometry/path, TF 오류, 큰 경로/방향 오차,
-  연속 solver 실패
+- 기본 상태: disabled dry-run
+- 안전 정지: collision, AEB, stale topic/TF, 큰 경로 오차, solver 연속 실패
 
-원본 참고 코드:
-<https://github.com/jasonf27/f1tenth_autonomous_anonymous/tree/main/lab-7-model-predictive-control-autonomous-anonymous-main>
+MPC는 장애물을 센서에서 찾는 알고리즘이 아닙니다. planning이 `/scan`과 `/map`으로
+충돌 없는 `/planning/path`를 만들고, MPC는 차량의 조향·가속·속도 제약을 고려해 그
+경로를 예측 추종합니다.
 
 ## 실행
 
-Gym, AMCL, planning이 실행된 상태에서 다음을 사용한다.
-
 ```bash
-docker exec -it f1tenth_gym_ros_humble-sim-1 bash
-source /opt/ros/humble/setup.bash
-source /sim_ws/install/setup.bash
-ros2 launch control control.launch.py controller:=mpc
+ros2 launch f1tenth_bringup autonomy.launch.py \
+  track:=track03 controller:=mpc mpc_profile:=speed_0.55 \
+  friction:=auto obstacles:=false
 ```
 
-다른 터미널에서 dry-run 출력을 확인한다.
+dry-run 확인 후 시작합니다.
 
 ```bash
 ros2 topic echo /drive --once
 ros2 topic echo /mpc/proposed_drive --once
 ros2 topic echo /mpc/solve_time_ms
-```
-
-`/drive`가 `speed: 0.0`인 것을 확인한 뒤에만 주행을 시작한다.
-
-```bash
 ros2 service call /control/enable std_srvs/srv/SetBool "{data: true}"
 ```
 
-정지:
+즉시 정지:
 
 ```bash
 ros2 service call /control/enable std_srvs/srv/SetBool "{data: false}"
 ```
 
-RViz에서는 `/mpc/reference_path`가 주황색, `/mpc/predicted_path`가 파란색이다.
+RViz의 `/mpc/reference_path`는 주황색, `/mpc/predicted_path`는 파란색입니다.
 
-## 설정과 튜닝 순서
+## 프로필과 튜닝
 
-현재 적용 파일은 `config/mpc_params.yaml`이다. 실험했던 원본 설정은
-`mpc_params_baseline.yaml`, 첫 튜닝은 `mpc_params_tuned_v1.yaml`로 보존했다.
+모든 설정은 `config/mpc_params.yaml` 한 파일에 있습니다. `common`은 안전·차량
+공통값이고 `speed_template`은 모든 동적 속도 실행에서 공유합니다. 속도별 파일이나
+YAML 항목을 만들지 않고 `mpc_profile:=speed_0.85`처럼 실행 시 지정합니다.
 
-1. `target_speed`, `corner_slowdown_gain`, `min_reference_speed`로 속도를 먼저
-   맞춘다. 오차가 큰 급커브에서는 slowdown gain을 올리거나 min speed를 내린다.
-2. `q_x`, `q_y`, `q_yaw`를 올리면 경로/방향 오차를 더 강하게 줄인다.
-3. `r_steering`, `rd_steering`을 올리면 조향은 부드러워지지만 급커브 반응이
-   느려진다.
-4. `horizon_steps`를 올리면 더 멀리 보지만 계산량이 증가한다. 반드시
-   `/mpc/solve_time_ms`의 p95가 100 ms보다 작은지 확인한다.
-5. 한 번에 한 종류만 바꾸고 동일 시작 자세, 1랩, collision 0 조건으로 비교한다.
+권장 순서:
 
-## 이번 측정 결과
+1. 동일 맵, 시작 자세, 마찰계수, 장애물 seed를 고정합니다.
+2. `target_speed`, `max_speed`, `corner_slowdown_gain`으로 속도 프로필을 맞춥니다.
+3. `q_x`, `q_y`, `q_yaw`로 경로와 방향 오차를 조절합니다.
+4. `r_steering`, `rd_steering`으로 급격한 조향을 억제합니다.
+5. 필요할 때만 `horizon_steps`를 늘리고 solver p95가 제어주기 100 ms보다 작은지
+   확인합니다.
+6. 한 번에 한 파라미터 묶음만 바꾸고 충돌, lap time, CTE, solver time을 기록합니다.
 
-| Controller | Lap [s] | Mean CTE [m] | P95 CTE [m] | Max CTE [m] | Collision |
-|---|---:|---:|---:|---:|---:|
-| Pure Pursuit safe | 48.45 | 0.068 | 0.116 | 0.164 | 0 |
-| MPC baseline | 44.13 | 0.117 | 0.211 | 0.241 | 0 |
-| MPC tuned v1 | 42.78 | 0.102 | 0.240 | 0.311 | 0 |
-| MPC tuned v2 | 56.56 | 0.070 | 0.111 | 0.140 | 0 |
-
-MPC tuned v2 solver 시간은 mean 14.73 ms, p95 19.81 ms, max 34.33 ms로
-10 Hz deadline인 100 ms 이내였다.
-
-## Bag 분석
+마찰계수 비교는 MPC 파일을 복사하지 않고 launch에서 선택합니다.
 
 ```bash
-python3 /sim_ws/src/control/scripts/analyze_mpc_bag.py \
-  /sim_ws/src/control/results/mpc_bags/track02_mpc_tuned_v2_01
+ros2 launch f1tenth_bringup autonomy.launch.py \
+  track:=track03 controller:=mpc mpc_profile:=speed_0.85 friction:=0.70
 ```
 
-## 장애물 회피 범위
+## 현재 검증 범위
 
-현재 단계는 최적화된 safe raceline을 따라가므로 지도에 이미 있는 벽은 피한다.
-하지만 주행 중 새로 놓인 동적/미등록 장애물을 우회하는 local planning은 아직 없다.
-LaserScan으로 장애물을 검출해 단순 정지만 붙이는 것은 emergency safety이고,
-회피라 부르지 않는다. 다음 단계에서는 scan 기반 obstacle cluster와 local occupancy를
-만들고, raceline 좌우의 후보 경로를 평가하거나 sequential convex MPC에 obstacle
-distance constraint를 추가해야 한다.
+| Profile | Lap [s] | True CTE mean/P95/max [m] | Collision |
+|---|---:|---:|---:|
+| baseline | 44.13 | 0.136 / 0.266 / 0.306 | 0 |
+| tuned_v1 | 42.78 | 0.118 / 0.301 / 0.347 | 0 |
+| tuned_v2 | 56.56 | 0.077 / 0.150 / 0.182 | 0 |
+
+tuned_v2 solver 시간은 mean 14.73 ms, p95 19.81 ms, max 34.33 ms였습니다.
+이 결과는 track02, 저속, 장애물 없는 1랩 조건의 기준선입니다. 고속·저마찰·다중랩과
+랜덤 장애물 조건은 별도 검증이 필요합니다.
+
+## 장애물 조건 확인
+
+```bash
+ros2 service call /simulation/randomize_obstacles std_srvs/srv/Trigger "{}"
+ros2 topic echo /planning/local_status
+ros2 topic echo /safety/emergency_stop
+ros2 topic echo /planning/path --once
+```
+
+정상은 `GLOBAL_PATH_CLEAR`, 회피 중에는 `AVOIDING ...`, 안전 정지는 `AEB_STOP`
+또는 `NO_COLLISION_FREE_PATH`로 표시됩니다. 처음에는 초기 pose를 다시 맞춘 뒤 seed당
+한 랩씩 검증합니다.

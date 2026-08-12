@@ -69,20 +69,17 @@ RUN source /opt/ros/humble/setup.bash && \
     rosdep install -i --from-path src --rosdistro humble -y && \
     colcon build
 
+# Mapping and inspection tools used by the competition workflow. Runtime Nav2
+# dependencies are installed above from package.xml via rosdep.
+RUN apt-get update --fix-missing && apt-get install -y \
+    ros-humble-slam-toolbox \
+    ros-humble-rqt-graph \
+    ros-humble-tf2-tools && \
+    rm -rf /var/lib/apt/lists/*
+
+# Keep CasADi available for future nonlinear MPC comparisons without adding a
+# second controller image.
+RUN python3 -m pip install --no-cache-dir casadi==3.7.2 --no-deps
+
 WORKDIR '/sim_ws'
 ENTRYPOINT ["/bin/bash"]
-
-# 추가 패키지
-RUN apt-get update && apt-get install -y \
-    ros-humble-slam-toolbox \
-    ros-humble-nav2-amcl \
-    ros-humble-nav2-rviz-plugins \
-    ros-humble-nav2-map-server \
-    ros-humble-nav2-lifecycle-manager \
-    ros-humble-ackermann-msgs \
-    ros-humble-teleop-twist-keyboard \
-    ros-humble-joint-state-publisher \
-    ros-humble-xacro \
-    ros-humble-cartographer \
-    ros-humble-cartographer-ros && \
-    python3 -m pip install --no-cache-dir casadi==3.7.2 --no-deps

@@ -40,6 +40,7 @@ setup(
     entry_points={
         'console_scripts': [
             'waypoint_planner_node = planning.waypoint_planner_node:main',
+            'local_obstacle_planner_node = planning.local_obstacle_planner_node:main',
         ],
     },
 )

@@ -126,9 +126,78 @@ def extract_cycle(graph):
     }
     invalid = [point for point, degree in degrees.items() if degree != 2]
     if invalid:
-        raise RuntimeError(
-            f'Centerline core is not a single cycle: {len(invalid)} invalid graph nodes.'
-        )
+        # Mapping artifacts can produce a small loop joined to the main
+        # course, or a theta graph with several possible closed routes. Walk
+        # every degree-two segment between junctions, assemble its simple
+        # cycles, and retain the longest valid cycle as the main course.
+        junctions = set(invalid)
+        segments = []
+
+        for junction in invalid:
+            for first in (neighbor for neighbor in graph[junction] if neighbor in active):
+                path = [junction, first]
+                previous = junction
+                current = first
+
+                while current not in junctions:
+                    candidates = [
+                        neighbor
+                        for neighbor in graph[current]
+                        if neighbor in active and neighbor != previous
+                    ]
+                    if len(candidates) != 1 or len(path) > len(active):
+                        path = []
+                        break
+                    previous, current = current, candidates[0]
+                    path.append(current)
+
+                if path:
+                    segments.append(path)
+
+        cycle_candidates = set()
+        connecting_segments = {}
+
+        for path in segments:
+            if path[0] == path[-1]:
+                cycle_candidates.add(frozenset(path[:-1]))
+                continue
+
+            endpoints = frozenset((path[0], path[-1]))
+            connecting_segments.setdefault(endpoints, set()).add(frozenset(path))
+
+        for paths in connecting_segments.values():
+            paths = list(paths)
+            for first_index in range(len(paths)):
+                for second_index in range(first_index + 1, len(paths)):
+                    cycle_candidates.add(paths[first_index] | paths[second_index])
+
+        valid_cycles = []
+        for candidate in cycle_candidates:
+            candidate_degrees = {
+                point: sum(neighbor in candidate for neighbor in graph[point])
+                for point in candidate
+            }
+            if candidate and all(degree == 2 for degree in candidate_degrees.values()):
+                length = sum(
+                    math.hypot(neighbor[0] - point[0], neighbor[1] - point[1])
+                    for point in candidate
+                    for neighbor in graph[point]
+                    if neighbor in candidate and point < neighbor
+                )
+                valid_cycles.append((length, set(candidate)))
+
+        if valid_cycles:
+            _, active = max(valid_cycles, key=lambda item: item[0])
+            degrees = {
+                point: sum(neighbor in active for neighbor in graph[point])
+                for point in active
+            }
+            invalid = [point for point, degree in degrees.items() if degree != 2]
+
+        if invalid:
+            raise RuntimeError(
+                f'Centerline core is not a single cycle: {len(invalid)} invalid graph nodes.'
+            )
 
     start = next(iter(active))
     visited = set()
@@ -218,8 +287,14 @@ def smooth_and_resample(points, spacing, smoothing_sigma):
 def path_geometry(points, spacing):
     dx = (np.roll(points[:, 0], -1) - np.roll(points[:, 0], 1)) / (2.0 * spacing)
     dy = (np.roll(points[:, 1], -1) - np.roll(points[:, 1], 1)) / (2.0 * spacing)
-    ddx = (np.roll(points[:, 0], -1) - 2.0 * points[:, 0] + np.roll(points[:, 0], 1)) / (spacing ** 2)
-    ddy = (np.roll(points[:, 1], -1) - 2.0 * points[:, 1] + np.roll(points[:, 1], 1)) / (spacing ** 2)
+    ddx = (
+        np.roll(points[:, 0], -1)
+        - 2.0 * points[:, 0]
+        + np.roll(points[:, 0], 1)) / (spacing ** 2)
+    ddy = (
+        np.roll(points[:, 1], -1)
+        - 2.0 * points[:, 1]
+        + np.roll(points[:, 1], 1)) / (spacing ** 2)
 
     yaw = np.arctan2(dy, dx)
     denominator = np.maximum((dx * dx + dy * dy) ** 1.5, 1e-9)

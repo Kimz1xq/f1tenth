@@ -1,30 +1,85 @@
-linear_mpc_node:
-  ros__parameters:
-    enabled: false
-    solve_when_disabled: true
+# Common MPC parameters, named comparison profiles, and one reusable dynamic
+# speed template selected with mpc_profile:=speed_<m/s>.
+common:
+  enabled: false
+  solve_when_disabled: true
+  global_frame_id: map
+  base_frame_id: ego_racecar/base_link
+  odom_topic: /ego_racecar/odom
+  path_topic: /planning/path
+  drive_topic: /drive
+  collision_topic: /ego_racecar/collision
+  emergency_stop_topic: /safety/emergency_stop
+  wheelbase: 0.33
+  dt: 0.10
+  control_rate: 10.0
+  max_acceleration: 1.50
+  max_steering_angle: 0.4189
+  max_path_distance: 0.80
+  max_heading_error: 1.0472
+  odom_timeout: 0.50
+  path_timeout: 2.00
+  search_back_points: 5
+  search_forward_points: 30
 
-    global_frame_id: "map"
-    base_frame_id: "ego_racecar/base_link"
-    odom_topic: "/ego_racecar/odom"
-    path_topic: "/planning/path"
-    drive_topic: "/drive"
-    collision_topic: "/ego_racecar/collision"
+# Reused for every dynamic speed request. target_speed, max_speed, and the
+# curvature-dependent minimum speed are filled by control.launch.py.
+speed_template:
+  horizon_steps: 20
+  max_steering_rate: 2.00
+  corner_slowdown_gain: 1.10
+  q_x: 45.0
+  q_y: 45.0
+  q_speed: 8.0
+  q_yaw: 16.0
+  qf_scale: 2.5
+  r_acceleration: 0.20
+  r_steering: 0.70
+  rd_acceleration: 0.50
+  rd_steering: 4.00
 
-    wheelbase: 0.33
+profiles:
+  baseline:
+    horizon_steps: 12
+    target_speed: 0.55
+    min_reference_speed: 0.30
+    max_speed: 0.80
+    max_steering_rate: 1.20
+    corner_slowdown_gain: 0.35
+    q_x: 20.0
+    q_y: 20.0
+    q_speed: 3.0
+    q_yaw: 8.0
+    qf_scale: 1.5
+    r_acceleration: 0.20
+    r_steering: 1.00
+    rd_acceleration: 0.50
+    rd_steering: 8.00
+
+  tuned_v1:
     horizon_steps: 16
-    dt: 0.10
-    control_rate: 10.0
-
-    # Conservative first closed-loop test.
     target_speed: 0.55
     min_reference_speed: 0.28
     max_speed: 0.75
-    max_acceleration: 1.50
-    max_steering_angle: 0.4189
     max_steering_rate: 1.60
     corner_slowdown_gain: 0.65
+    q_x: 35.0
+    q_y: 35.0
+    q_speed: 3.0
+    q_yaw: 12.0
+    qf_scale: 2.0
+    r_acceleration: 0.20
+    r_steering: 0.60
+    rd_acceleration: 0.50
+    rd_steering: 4.00
 
-    # Cost weights: state [x, y, speed, yaw], input [accel, steer].
+  tuned_v2:
+    horizon_steps: 16
+    target_speed: 0.55
+    min_reference_speed: 0.28
+    max_speed: 0.75
+    max_steering_rate: 1.60
+    corner_slowdown_gain: 0.65
     q_x: 35.0
     q_y: 35.0
     q_speed: 8.0
@@ -34,10 +89,3 @@ linear_mpc_node:
     r_steering: 0.60
     rd_acceleration: 0.50
     rd_steering: 4.00
-
-    max_path_distance: 0.80
-    max_heading_error: 1.0472
-    odom_timeout: 0.50
-    path_timeout: 2.00
-    search_back_points: 5
-    search_forward_points: 30

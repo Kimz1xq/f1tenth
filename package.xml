@@ -12,6 +12,8 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>ackermann_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
@@ -25,6 +27,9 @@
   <exec_depend>teleop_twist_keyboard</exec_depend>
   
   <depend>python-transforms3d-pip</depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

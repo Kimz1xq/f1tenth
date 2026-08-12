@@ -13,7 +13,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
 
-from nav_msgs.msg import Path
+from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Bool
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -24,11 +24,14 @@ class ClosedLoopTest(Node):
         super().__init__('closed_loop_test')
         self.path = None
         self.collision = False
+        self.ground_truth_xy = None
         self.tf_buffer = Buffer(cache_time=Duration(seconds=5.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.create_subscription(Path, '/planning/path', self.path_callback, 10)
         self.create_subscription(
             Bool, '/ego_racecar/collision', self.collision_callback, 10)
+        self.create_subscription(
+            Odometry, '/ground_truth/odom', self.ground_truth_callback, 10)
         self.enable_client = self.create_client(SetBool, '/control/enable')
 
     def path_callback(self, msg):
@@ -39,6 +42,10 @@ class ClosedLoopTest(Node):
 
     def collision_callback(self, msg):
         self.collision = msg.data
+
+    def ground_truth_callback(self, msg):
+        position = msg.pose.pose.position
+        self.ground_truth_xy = (position.x, position.y)
 
     def vehicle_xy(self):
         transform = self.tf_buffer.lookup_transform(
@@ -88,7 +95,7 @@ def main():
     samples = []
     distance_travelled = 0.0
     progress_points = 0
-    previous_xy = None
+    previous_truth_xy = None
     previous_index = None
     next_report = 0.0
     enabled = False
@@ -119,15 +126,24 @@ def main():
             rclpy.spin_once(node, timeout_sec=0.04)
             now = time.monotonic()
             try:
-                x, y = node.vehicle_xy()
+                estimated_x, estimated_y = node.vehicle_xy()
             except TransformException:
                 continue
 
-            nearest_index, error = nearest_index_and_distance(
-                node.path, x, y, previous_index)
-            if previous_xy is not None:
-                distance_travelled += math.dist(previous_xy, (x, y))
-            previous_xy = (x, y)
+            nearest_index, estimated_error = nearest_index_and_distance(
+                node.path, estimated_x, estimated_y, previous_index)
+            truth_x, truth_y = (
+                node.ground_truth_xy
+                if node.ground_truth_xy is not None
+                else (estimated_x, estimated_y))
+            _, truth_error = nearest_index_and_distance(
+                node.path, truth_x, truth_y, nearest_index)
+            localization_error = math.hypot(
+                estimated_x - truth_x, estimated_y - truth_y)
+            if previous_truth_xy is not None:
+                distance_travelled += math.dist(
+                    previous_truth_xy, (truth_x, truth_y))
+            previous_truth_xy = (truth_x, truth_y)
 
             if previous_index is not None:
                 delta = (nearest_index - previous_index) % len(node.path)
@@ -137,18 +153,23 @@ def main():
             previous_index = nearest_index
 
             elapsed = now - started
-            samples.append((elapsed, x, y, nearest_index, error))
+            samples.append((
+                elapsed, estimated_x, estimated_y, truth_x, truth_y,
+                nearest_index, estimated_error, truth_error,
+                localization_error))
             if node.collision:
                 raise RuntimeError('Collision reported by F1TENTH Gym')
-            if error > args.max_error:
+            if truth_error > args.max_error:
                 raise RuntimeError(
-                    'Safety limit exceeded: path error %.3f m' % error)
+                    'Safety limit exceeded: ground-truth path error %.3f m'
+                    % truth_error)
 
             if now >= next_report:
                 print(
-                    't=%5.1fs  pose=(%6.2f,%6.2f)  path_error=%.3fm  '
-                    'progress=%.2f laps' % (
-                        elapsed, x, y, error,
+                    't=%5.1fs  truth=(%6.2f,%6.2f)  true_cte=%.3fm  '
+                    'amcl_error=%.3fm  progress=%.2f laps' % (
+                        elapsed, truth_x, truth_y, truth_error,
+                        localization_error,
                         progress_points / max(len(node.path), 1)),
                     flush=True)
                 next_report = now + 2.0
@@ -171,20 +192,37 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     with open(args.output, 'w', newline='') as output_file:
         writer = csv.writer(output_file)
-        writer.writerow(['time_s', 'x_m', 'y_m', 'nearest_index', 'error_m'])
+        writer.writerow([
+            'time_s', 'x_m', 'y_m', 'truth_x_m', 'truth_y_m',
+            'nearest_index', 'error_m', 'truth_error_m',
+            'localization_error_m'])
         writer.writerows(samples)
 
-    errors = [sample[-1] for sample in samples]
-    errors_sorted = sorted(errors)
-    p95 = errors_sorted[min(int(0.95 * len(errors_sorted)), len(errors_sorted) - 1)]
+    estimated_errors = [sample[6] for sample in samples]
+    truth_errors = [sample[7] for sample in samples]
+    localization_errors = [sample[8] for sample in samples]
+
+    def p95(values):
+        ordered = sorted(values)
+        return ordered[min(int(0.95 * len(ordered)), len(ordered) - 1)]
+
     print('RESULT', flush=True)
     print('  duration_s       : %.2f' % samples[-1][0], flush=True)
     print('  distance_m       : %.2f' % distance_travelled, flush=True)
     print('  progress_laps    : %.3f' % (
         progress_points / max(len(node.path or []), 1)), flush=True)
-    print('  mean_error_m     : %.3f' % statistics.fmean(errors), flush=True)
-    print('  p95_error_m      : %.3f' % p95, flush=True)
-    print('  max_error_m      : %.3f' % max(errors), flush=True)
+    print('  estimated_cte_mean_m : %.3f' % statistics.fmean(
+        estimated_errors), flush=True)
+    print('  estimated_cte_p95_m  : %.3f' % p95(estimated_errors), flush=True)
+    print('  estimated_cte_max_m  : %.3f' % max(estimated_errors), flush=True)
+    print('  truth_cte_mean_m     : %.3f' % statistics.fmean(
+        truth_errors), flush=True)
+    print('  truth_cte_p95_m      : %.3f' % p95(truth_errors), flush=True)
+    print('  truth_cte_max_m      : %.3f' % max(truth_errors), flush=True)
+    print('  localization_mean_m  : %.3f' % statistics.fmean(
+        localization_errors), flush=True)
+    print('  localization_p95_m   : %.3f' % p95(
+        localization_errors), flush=True)
     print('  samples          : %d' % len(samples), flush=True)
     print('  csv              : %s' % args.output, flush=True)
 

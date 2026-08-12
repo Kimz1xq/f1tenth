@@ -1,4 +1,5 @@
-"""Linear MPC raceline tracker for the F1TENTH Gym bridge.
+"""
+Linear MPC raceline tracker for the F1TENTH Gym bridge.
 
 The kinematic bicycle model and quadratic-program structure are adapted from
 the MIT-licensed F1TENTH Lab 7 MPC example:
@@ -39,6 +40,8 @@ class LinearMpcNode(Node):
         self.declare_parameter('path_topic', '/planning/path')
         self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('collision_topic', '/ego_racecar/collision')
+        self.declare_parameter(
+            'emergency_stop_topic', '/safety/emergency_stop')
 
         self.declare_parameter('wheelbase', 0.33)
         self.declare_parameter('horizon_steps', 12)
@@ -46,6 +49,7 @@ class LinearMpcNode(Node):
         self.declare_parameter('control_rate', 10.0)
         self.declare_parameter('target_speed', 0.55)
         self.declare_parameter('min_reference_speed', 0.30)
+        self.declare_parameter('min_command_speed', 0.0)
         self.declare_parameter('max_speed', 0.80)
         self.declare_parameter('max_acceleration', 1.50)
         self.declare_parameter('max_steering_angle', 0.4189)
@@ -78,6 +82,8 @@ class LinearMpcNode(Node):
         self.path_topic = self.get_parameter('path_topic').value
         self.drive_topic = self.get_parameter('drive_topic').value
         self.collision_topic = self.get_parameter('collision_topic').value
+        self.emergency_stop_topic = self.get_parameter(
+            'emergency_stop_topic').value
 
         self.wheelbase = float(self.get_parameter('wheelbase').value)
         self.horizon = int(self.get_parameter('horizon_steps').value)
@@ -86,6 +92,8 @@ class LinearMpcNode(Node):
         self.target_speed = float(self.get_parameter('target_speed').value)
         self.min_reference_speed = float(
             self.get_parameter('min_reference_speed').value)
+        self.min_command_speed = float(
+            self.get_parameter('min_command_speed').value)
         self.max_speed = float(self.get_parameter('max_speed').value)
         self.max_acceleration = float(
             self.get_parameter('max_acceleration').value)
@@ -128,11 +136,15 @@ class LinearMpcNode(Node):
             raise RuntimeError('horizon_steps must be at least 2')
         if self.dt <= 0.0:
             raise RuntimeError('dt must be positive')
+        if not 0.0 <= self.min_command_speed <= self.max_speed:
+            raise RuntimeError(
+                'min_command_speed must be between 0 and max_speed')
 
         self.current_odom = None
         self.last_odom_time = None
         self.last_path_time = None
         self.collision = False
+        self.emergency_stop = False
         self.path_points = None
         self.path_yaw = None
         self.path_curvature = None
@@ -155,6 +167,11 @@ class LinearMpcNode(Node):
         self.create_subscription(Path, self.path_topic, self.path_callback, 10)
         self.create_subscription(
             Bool, self.collision_topic, self.collision_callback, 10)
+        self.create_subscription(
+            Bool,
+            self.emergency_stop_topic,
+            self.emergency_stop_callback,
+            10)
 
         self.drive_pub = self.create_publisher(
             AckermannDriveStamped, self.drive_topic, 10)
@@ -190,6 +207,11 @@ class LinearMpcNode(Node):
             self.publish_stop()
             self.get_logger().error('MPC disabled: simulator collision reported')
 
+    def emergency_stop_callback(self, msg):
+        self.emergency_stop = bool(msg.data)
+        if self.emergency_stop:
+            self.publish_stop()
+
     def path_callback(self, msg):
         if len(msg.poses) < 4:
             return
@@ -213,7 +235,8 @@ class LinearMpcNode(Node):
             self.nearest_index = None
             self.get_logger().info(
                 'MPC received closed path: %d points, %.2f m'
-                % (len(points), self.path_length))
+                % (len(points), self.path_length),
+                throttle_duration_sec=2.0)
         self.last_path_time = self.get_clock().now()
 
     def set_closed_path(self, points):
@@ -269,7 +292,6 @@ class LinearMpcNode(Node):
         constraints = [
             self.state_variable[:, 0] == self.initial_state_parameter,
             self.state_variable[2, :] >= 0.0,
-            self.state_variable[2, :] <= self.max_speed,
         ]
 
         for step in range(n):
@@ -354,6 +376,8 @@ class LinearMpcNode(Node):
             return 'odometry is stale'
         if self.collision:
             return 'collision is active; reset simulator pose first'
+        if self.emergency_stop:
+            return 'local planner emergency stop is active'
         return None
 
     def candidate_indices(self):
@@ -634,6 +658,8 @@ class LinearMpcNode(Node):
             )
             command_speed = self.clamp(
                 speed + acceleration * self.dt, 0.0, self.max_speed)
+            if command_speed > 0.0:
+                command_speed = max(command_speed, self.min_command_speed)
             self.publish_proposed_drive(command_speed, steering)
             if not self.enabled:
                 self.publish_stop()
@@ -666,9 +692,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.publish_stop()
+        if rclpy.ok():
+            node.publish_stop()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

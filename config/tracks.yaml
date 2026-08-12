@@ -1,0 +1,20 @@
+default_track: track03
+
+# Runtime-ready competition tracks. Add a map here only after its raceline
+# passes validate_raceline.py.
+tracks:
+  track02:
+    map_path: /sim_ws/src/f1tenth_gym_ros/maps/track02
+    map_ext: .png
+    centerline: /sim_ws/src/planning/waypoints/track02_centerline.csv
+    raceline: /sim_ws/src/planning/waypoints/track02_raceline.csv
+    start: [0.2985, 0.5926, -0.6205]
+    friction_mu: 1.0489
+
+  track03:
+    map_path: /sim_ws/src/f1tenth_gym_ros/maps/track03
+    map_ext: .pgm
+    centerline: /sim_ws/src/planning/waypoints/track03_centerline.csv
+    raceline: /sim_ws/src/planning/waypoints/track03_raceline.csv
+    start: [0.2985, 0.5926, -0.6205]
+    friction_mu: 1.0489
