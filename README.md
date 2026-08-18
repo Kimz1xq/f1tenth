@@ -167,6 +167,8 @@ config/amcl.yaml                            시뮬레이션 AMCL 프레임과 �
 cd /sim_ws
 colcon build --symlink-install --packages-select planning control f1tenth_bringup
 colcon test --packages-select planning control f1tenth_bringup
-colcon test-result --verbose
+colcon test-result --test-result-base build/planning --verbose
+colcon test-result --test-result-base build/control --verbose
+colcon test-result --test-result-base build/f1tenth_bringup --verbose
 source install/setup.bash
 ```
