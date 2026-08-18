@@ -81,7 +81,9 @@ bridge:
     obstacle_start_clearance: 1.50
     obstacle_min_spacing: 3.00
     obstacle_passage_offset: 0.18
-    obstacle_passage_radius: 0.17
+    # Match the local planner's map_clearance so every generated obstacle has
+    # at least one passage that the planner can actually accept.
+    obstacle_passage_radius: 0.19
     obstacle_marker_topic: '/simulation/obstacles_ground_truth'
     vehicle_length: 0.58
     vehicle_width: 0.31

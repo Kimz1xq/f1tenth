@@ -1,6 +1,7 @@
 waypoint_planner_node:
   ros__parameters:
-    waypoint_csv: "/sim_ws/src/planning/waypoints/track03_raceline.csv"
+    # Selected by planning.launch.py; no simulator or map-specific source path.
+    waypoint_csv: ""
     path_topic: "/planning/global_path"
     marker_topic: "/planning/markers"
     frame_id: "map"
@@ -14,41 +15,67 @@ local_obstacle_planner_node:
     map_topic: "/map"
     odom_topic: "/ego_racecar/odom"
     emergency_stop_topic: "/safety/emergency_stop"
+    avoidance_active_topic: "/planning/avoidance_active"
     marker_topic: "/planning/local_markers"
     status_topic: "/planning/local_status"
     global_frame_id: "map"
     odom_frame_id: "odom"
     base_frame_id: "ego_racecar/base_link"
-    planning_rate: 10.0
-    scan_process_rate: 10.0
+    # /scan is 40 Hz and /odom is 50 Hz on the current car. Planning at
+    # 20 Hz halves avoidance latency without processing every laser packet.
+    planning_rate: 20.0
+    scan_process_rate: 20.0
     scan_transform_delay: 0.08
 
-    detection_range: 3.0
+    detection_range: 6.0
     map_endpoint_clearance: 0.30
     cluster_gap: 0.16
     cluster_min_points: 8
     cluster_max_diameter: 0.55
     path_obstacle_corridor: 0.55
     obstacle_memory_seconds: 0.8
-    obstacle_confirmation_frames: 3
+    obstacle_confirmation_frames: 2
     obstacle_match_distance: 0.35
     # 0.20 x 0.12 m obstacle footprint의 외접원에 가까운 기본 반경.
     obstacle_default_radius: 0.11
     obstacle_max_radius: 0.12
+    obstacle_marker_radius_scale: 1.0
     obstacle_lookahead: 3.2
+    # Speed-adaptive horizon = reaction + v^2/(2a) + margin, bounded here.
+    maximum_planning_horizon: 6.0
+    planning_reaction_time: 0.25
+    planning_deceleration: 4.0
+    planning_distance_margin: 0.50
 
     candidate_offsets: [0.0, -0.20, 0.20, -0.24, 0.24, -0.28, 0.28, -0.36, 0.36, -0.44, 0.44, -0.52, 0.52, -0.60, 0.60]
     avoidance_before_distance: 1.80
     avoidance_after_distance: 1.10
+    maximum_avoidance_before_distance: 4.0
+    maximum_avoidance_after_distance: 2.0
+    avoidance_before_time: 0.75
+    avoidance_after_time: 0.40
     path_sample_spacing: 0.04
     # 0.17 m vehicle lateral radius + 0.02 m wall margin.
     map_clearance: 0.19
     vehicle_clearance_radius: 0.17
     obstacle_safety_margin: 0.02
 
+    # Conservative real-vehicle AEB baseline. Keep these independent from the
+    # RViz marker size and tune only from measured braking data.
     aeb_corridor_half_width: 0.19
     aeb_reaction_time: 0.12
-    aeb_max_deceleration: 2.0
+    aeb_max_deceleration: 4.0
     aeb_min_distance: 0.16
+    aeb_critical_reaction_time: 0.05
     aeb_confirmation_frames: 2
     scan_timeout: 0.50
+
+    # The controller takes this topic as a limit, not as a fixed avoidance
+    # speed. Straights remain fast while curvature sets a physically meaningful
+    # limit through a_y = v^2*kappa.
+    maximum_planning_speed: 5.5
+    minimum_avoidance_speed: 0.60
+    max_lateral_acceleration: 1.50
+    candidate_curvature_weight: 0.35
+    candidate_clearance_weight: 0.10
+    curvature_percentile: 85.0

@@ -58,6 +58,7 @@ def main():
     parser.add_argument('--preview', required=True)
     parser.add_argument('--free-threshold', type=int, default=230)
     parser.add_argument('--vehicle-width', type=float, default=0.296)
+    parser.add_argument('--vehicle-length', type=float, default=0.58)
     parser.add_argument('--required-margin', type=float, default=0.05)
     args = parser.parse_args()
 
@@ -95,9 +96,15 @@ def main():
         raise RuntimeError('Raceline leaves the detected track area.')
 
     vehicle_margin = clearances.min() - args.vehicle_width * 0.5
-    if vehicle_margin < args.required_margin:
+    # A width-only check misses front-corner wall strikes in bends.  The
+    # circumscribed footprint radius is conservative for every vehicle yaw and
+    # therefore remains valid for arbitrary track geometry.
+    footprint_radius = 0.5 * np.hypot(
+        args.vehicle_length, args.vehicle_width)
+    footprint_margin = clearances.min() - footprint_radius
+    if footprint_margin < args.required_margin:
         raise RuntimeError(
-            f'Raceline vehicle margin {vehicle_margin:.3f}m is below '
+            f'Raceline footprint margin {footprint_margin:.3f}m is below '
             f'{args.required_margin:.3f}m.'
         )
 
@@ -118,6 +125,7 @@ def main():
     print(f'closure_gap={closure_gap:.6f}m')
     print(f'min_center_clearance={clearances.min():.3f}m')
     print(f'min_vehicle_margin={vehicle_margin:.3f}m')
+    print(f'min_footprint_margin={footprint_margin:.3f}m')
     print(f'preview={args.preview}')
 
 

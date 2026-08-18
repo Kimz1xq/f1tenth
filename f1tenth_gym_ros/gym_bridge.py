@@ -107,7 +107,7 @@ class GymBridge(Node):
         self.declare_parameter('obstacle_start_clearance', 1.50)
         self.declare_parameter('obstacle_min_spacing', 3.00)
         self.declare_parameter('obstacle_passage_offset', 0.18)
-        self.declare_parameter('obstacle_passage_radius', 0.17)
+        self.declare_parameter('obstacle_passage_radius', 0.19)
         self.declare_parameter(
             'obstacle_marker_topic',
             '/simulation/obstacles_ground_truth')

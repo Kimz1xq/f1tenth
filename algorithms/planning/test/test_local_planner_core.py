@@ -6,8 +6,10 @@ from planning.local_planner_core import (
     ClosedPathGeometry,
     cluster_ordered_points,
     ordered_candidate_offsets,
+    path_curvature_percentile,
     sample_closed_path,
     sample_path_window,
+    speed_dependent_horizon,
     update_tracked_obstacles,
 )
 
@@ -49,6 +51,25 @@ def test_offset_bump_is_smooth_and_local():
     assert np.allclose(shifted[0], geometry.points[0])
     assert np.allclose(shifted[1], [1.0, 0.3])
     assert np.allclose(shifted[2], geometry.points[2])
+
+
+def test_speed_horizon_grows_and_is_bounded():
+    """Planning distance grows with speed but respects sensor bounds."""
+    slow = speed_dependent_horizon(1.0, 0.25, 4.0, 0.5, 3.2, 6.0)
+    fast = speed_dependent_horizon(5.0, 0.25, 4.0, 0.5, 3.2, 6.0)
+    extreme = speed_dependent_horizon(20.0, 0.25, 4.0, 0.5, 3.2, 6.0)
+    assert slow == 3.2
+    assert 4.8 < fast < 5.0
+    assert extreme == 6.0
+
+
+def test_curvature_metric_distinguishes_straight_and_turn():
+    """The robust metric is near zero on a line and positive on a turn."""
+    straight = np.column_stack((np.linspace(0.0, 2.0, 21), np.zeros(21)))
+    theta = np.linspace(0.0, np.pi / 2.0, 21)
+    turn = np.column_stack((np.cos(theta), np.sin(theta)))
+    assert path_curvature_percentile(straight) < 1e-6
+    assert 0.8 < path_curvature_percentile(turn) < 1.2
 
 
 def test_scan_clusters_break_on_missing_beam():

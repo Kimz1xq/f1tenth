@@ -3,7 +3,7 @@
 <package format="3">
   <name>control</name>
   <version>0.1.0</version>
-  <description>Selectable Pure Pursuit and linear MPC control for F1TENTH.</description>
+  <description>Selectable Pure Pursuit, UNICORN L1, and linear MPC control for F1TENTH.</description>
   <maintainer email="jeonbotdae@example.com">jeonbotdae</maintainer>
   <license>MIT</license>
 

@@ -15,13 +15,16 @@ class WaypointPlannerNode(Node):
 
         self.declare_parameter(
             'waypoint_csv',
-            '/sim_ws/src/planning/waypoints/track03_raceline.csv')
+            '')
         self.declare_parameter('path_topic', '/planning/path')
         self.declare_parameter('marker_topic', '/planning/markers')
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('publish_rate', 2.0)
 
         self.waypoint_csv = self.get_parameter('waypoint_csv').value
+        if not self.waypoint_csv:
+            raise RuntimeError(
+                'waypoint_csv must be selected by the planning launch file')
         self.path_topic = self.get_parameter('path_topic').value
         self.marker_topic = self.get_parameter('marker_topic').value
         self.frame_id = self.get_parameter('frame_id').value

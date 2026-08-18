@@ -5,7 +5,9 @@ from collections import deque
 
 import numpy as np
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -19,7 +21,7 @@ from scipy.ndimage import distance_transform_edt
 from geometry_msgs.msg import Point, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -27,7 +29,9 @@ from planning.local_planner_core import (
     ClosedPathGeometry,
     cluster_ordered_points,
     ordered_candidate_offsets,
+    path_curvature_percentile,
     sample_path_window,
+    speed_dependent_horizon,
     update_tracked_obstacles,
 )
 
@@ -44,6 +48,9 @@ class LocalObstaclePlannerNode(Node):
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('odom_topic', '/ego_racecar/odom')
         self.declare_parameter('emergency_stop_topic', '/safety/emergency_stop')
+        self.declare_parameter(
+            'avoidance_active_topic', '/planning/avoidance_active')
+        self.declare_parameter('speed_limit_topic', '/planning/speed_limit')
         self.declare_parameter('marker_topic', '/planning/local_markers')
         self.declare_parameter('status_topic', '/planning/local_status')
         self.declare_parameter('global_frame_id', 'map')
@@ -63,7 +70,12 @@ class LocalObstaclePlannerNode(Node):
         self.declare_parameter('obstacle_match_distance', 0.35)
         self.declare_parameter('obstacle_default_radius', 0.11)
         self.declare_parameter('obstacle_max_radius', 0.12)
+        self.declare_parameter('obstacle_marker_radius_scale', 1.0)
         self.declare_parameter('obstacle_lookahead', 3.2)
+        self.declare_parameter('maximum_planning_horizon', 6.0)
+        self.declare_parameter('planning_reaction_time', 0.25)
+        self.declare_parameter('planning_deceleration', 4.0)
+        self.declare_parameter('planning_distance_margin', 0.50)
         self.declare_parameter(
             'candidate_offsets', [0.0, -0.20, 0.20, -0.24, 0.24,
                                   -0.28, 0.28,
@@ -71,6 +83,10 @@ class LocalObstaclePlannerNode(Node):
                                   -0.52, 0.52, -0.60, 0.60])
         self.declare_parameter('avoidance_before_distance', 1.80)
         self.declare_parameter('avoidance_after_distance', 1.10)
+        self.declare_parameter('maximum_avoidance_before_distance', 4.0)
+        self.declare_parameter('maximum_avoidance_after_distance', 2.0)
+        self.declare_parameter('avoidance_before_time', 0.60)
+        self.declare_parameter('avoidance_after_time', 0.30)
         self.declare_parameter('path_sample_spacing', 0.04)
         self.declare_parameter('map_clearance', 0.19)
         self.declare_parameter('vehicle_clearance_radius', 0.17)
@@ -79,8 +95,15 @@ class LocalObstaclePlannerNode(Node):
         self.declare_parameter('aeb_reaction_time', 0.12)
         self.declare_parameter('aeb_max_deceleration', 2.0)
         self.declare_parameter('aeb_min_distance', 0.16)
+        self.declare_parameter('aeb_critical_reaction_time', 0.05)
         self.declare_parameter('aeb_confirmation_frames', 2)
         self.declare_parameter('scan_timeout', 0.50)
+        self.declare_parameter('maximum_planning_speed', 5.5)
+        self.declare_parameter('minimum_avoidance_speed', 0.60)
+        self.declare_parameter('max_lateral_acceleration', 1.50)
+        self.declare_parameter('candidate_curvature_weight', 0.35)
+        self.declare_parameter('candidate_clearance_weight', 0.10)
+        self.declare_parameter('curvature_percentile', 90.0)
 
         self.global_frame = self.get_parameter('global_frame_id').value
         self.odom_frame = self.get_parameter('odom_frame_id').value
@@ -107,8 +130,20 @@ class LocalObstaclePlannerNode(Node):
         self.obstacle_max_radius = max(
             self.obstacle_default_radius,
             float(self.get_parameter('obstacle_max_radius').value))
+        self.obstacle_marker_radius_scale = max(0.1, min(
+            float(self.get_parameter('obstacle_marker_radius_scale').value),
+            1.0))
         self.obstacle_lookahead = float(
             self.get_parameter('obstacle_lookahead').value)
+        self.maximum_planning_horizon = max(
+            self.obstacle_lookahead,
+            float(self.get_parameter('maximum_planning_horizon').value))
+        self.planning_reaction_time = float(
+            self.get_parameter('planning_reaction_time').value)
+        self.planning_deceleration = float(
+            self.get_parameter('planning_deceleration').value)
+        self.planning_distance_margin = float(
+            self.get_parameter('planning_distance_margin').value)
         self.candidate_offsets = [
             float(value)
             for value in self.get_parameter('candidate_offsets').value]
@@ -116,6 +151,18 @@ class LocalObstaclePlannerNode(Node):
             self.get_parameter('avoidance_before_distance').value)
         self.avoidance_after = float(
             self.get_parameter('avoidance_after_distance').value)
+        self.maximum_avoidance_before = max(
+            self.avoidance_before,
+            float(self.get_parameter(
+                'maximum_avoidance_before_distance').value))
+        self.maximum_avoidance_after = max(
+            self.avoidance_after,
+            float(self.get_parameter(
+                'maximum_avoidance_after_distance').value))
+        self.avoidance_before_time = float(
+            self.get_parameter('avoidance_before_time').value)
+        self.avoidance_after_time = float(
+            self.get_parameter('avoidance_after_time').value)
         self.sample_spacing = float(
             self.get_parameter('path_sample_spacing').value)
         self.map_clearance = float(
@@ -132,6 +179,8 @@ class LocalObstaclePlannerNode(Node):
             self.get_parameter('aeb_max_deceleration').value)
         self.aeb_min_distance = float(
             self.get_parameter('aeb_min_distance').value)
+        self.aeb_critical_reaction_time = float(
+            self.get_parameter('aeb_critical_reaction_time').value)
         self.aeb_confirmation_frames = int(
             self.get_parameter('aeb_confirmation_frames').value)
         self.scan_timeout = float(self.get_parameter('scan_timeout').value)
@@ -139,6 +188,18 @@ class LocalObstaclePlannerNode(Node):
             float(self.get_parameter('scan_process_rate').value), 1.0)
         self.scan_transform_delay = float(
             self.get_parameter('scan_transform_delay').value)
+        self.maximum_planning_speed = float(
+            self.get_parameter('maximum_planning_speed').value)
+        self.minimum_avoidance_speed = float(
+            self.get_parameter('minimum_avoidance_speed').value)
+        self.max_lateral_acceleration = float(
+            self.get_parameter('max_lateral_acceleration').value)
+        self.candidate_curvature_weight = float(
+            self.get_parameter('candidate_curvature_weight').value)
+        self.candidate_clearance_weight = float(
+            self.get_parameter('candidate_clearance_weight').value)
+        self.curvature_percentile = float(
+            self.get_parameter('curvature_percentile').value)
 
         self.path_geometry = None
         self.map_clearance_grid = None
@@ -147,6 +208,7 @@ class LocalObstaclePlannerNode(Node):
         self.last_scan_time = None
         self.pending_scans = deque(maxlen=20)
         self.ttc_stop = False
+        self.nearest_corridor_distance = float('inf')
         self.aeb_detection_count = 0
         self.tracked_obstacles = []
         self.next_obstacle_id = 0
@@ -156,7 +218,11 @@ class LocalObstaclePlannerNode(Node):
         self.locked_offset = None
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=5.0))
+        # Keep TF reception independent from the comparatively expensive
+        # candidate-path evaluation. At racing speed a single-threaded TF
+        # listener can lag behind the scan timestamp and create false timeouts.
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.sensor_callback_group = MutuallyExclusiveCallbackGroup()
 
         self.create_subscription(
             Path,
@@ -172,7 +238,8 @@ class LocalObstaclePlannerNode(Node):
             LaserScan,
             self.get_parameter('scan_topic').value,
             self.scan_callback,
-            scan_qos)
+            scan_qos,
+            callback_group=self.sensor_callback_group)
         map_qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
@@ -187,12 +254,17 @@ class LocalObstaclePlannerNode(Node):
             Odometry,
             self.get_parameter('odom_topic').value,
             self.odom_callback,
-            10)
+            10,
+            callback_group=self.sensor_callback_group)
 
         self.path_pub = self.create_publisher(
             Path, self.get_parameter('local_path_topic').value, 10)
         self.stop_pub = self.create_publisher(
             Bool, self.get_parameter('emergency_stop_topic').value, 10)
+        self.avoidance_pub = self.create_publisher(
+            Bool, self.get_parameter('avoidance_active_topic').value, 10)
+        self.speed_limit_pub = self.create_publisher(
+            Float32, self.get_parameter('speed_limit_topic').value, 10)
         self.marker_pub = self.create_publisher(
             MarkerArray, self.get_parameter('marker_topic').value, 10)
         self.status_pub = self.create_publisher(
@@ -200,7 +272,9 @@ class LocalObstaclePlannerNode(Node):
 
         planning_rate = float(self.get_parameter('planning_rate').value)
         self.scan_timer = self.create_timer(
-            self.scan_process_period, self.process_pending_scan)
+            self.scan_process_period,
+            self.process_pending_scan,
+            callback_group=self.sensor_callback_group)
         self.timer = self.create_timer(
             1.0 / max(planning_rate, 1.0), self.plan)
         self.get_logger().info(
@@ -343,19 +417,35 @@ class LocalObstaclePlannerNode(Node):
 
     def process_pending_scan(self):
         now = self.get_clock().now()
-        selected = None
-        while self.pending_scans:
-            received_time, message, _ = self.pending_scans[0]
+        selected_index = None
+        # A lower scan processing rate intentionally skips some laser frames.
+        # Select the newest frame whose timestamped TF is already available;
+        # blindly selecting the newest delayed frame can remain a few
+        # milliseconds ahead of odometry and cause false scan timeouts.
+        for index in range(len(self.pending_scans) - 1, -1, -1):
+            received_time, message, map_from_odom = self.pending_scans[index]
             age = (now - received_time).nanoseconds * 1e-9
             if age < self.scan_transform_delay:
+                continue
+            if map_from_odom is None:
+                continue
+            scan_time = Time.from_msg(message.header.stamp)
+            if (self.tf_buffer.can_transform(
+                    self.odom_frame, message.header.frame_id, scan_time)
+                    and self.tf_buffer.can_transform(
+                        self.base_frame, message.header.frame_id, scan_time)):
+                selected_index = index
                 break
+        if selected_index is None:
+            return
+        selected = None
+        for _ in range(selected_index + 1):
             selected = self.pending_scans.popleft()
-        if selected is None:
-            return
-        _, message, map_from_odom = selected
-        if map_from_odom is None:
-            return
-        self.process_scan(message, now, map_from_odom)
+        received_time, message, map_from_odom = selected
+        processed = self.process_scan(message, now, map_from_odom)
+        retry_age = (now - received_time).nanoseconds * 1e-9
+        if not processed and retry_age < 0.25:
+            self.pending_scans.appendleft(selected)
 
     def process_scan(self, message, received_time, map_from_odom):
         ranges = np.asarray(message.ranges, dtype=float)
@@ -379,7 +469,7 @@ class LocalObstaclePlannerNode(Node):
                 'Cannot transform timestamped scan for local planning: %s'
                 % error,
                 throttle_duration_sec=2.0)
-            return
+            return False
         self.last_scan_time = received_time
         indexed_points = list(zip(
             indices.tolist(), map_x.tolist(), map_y.tolist()))
@@ -408,13 +498,16 @@ class LocalObstaclePlannerNode(Node):
             unmapped_mask
             & (base_x > 0.0)
             & (np.abs(base_y) < self.aeb_half_width)]
+        self.nearest_corridor_distance = (
+            float(np.min(obstacle_forward))
+            if len(obstacle_forward) else float('inf'))
         stop_distance = (
             self.aeb_min_distance
             + self.speed * self.aeb_reaction_time
             + self.speed ** 2 / (2.0 * max(self.aeb_deceleration, 0.1)))
         raw_ttc_stop = bool(
             len(obstacle_forward) > 0
-            and float(np.min(obstacle_forward)) < stop_distance)
+            and self.nearest_corridor_distance < stop_distance)
         self.aeb_detection_count = (
             self.aeb_detection_count + 1 if raw_ttc_stop else 0)
         self.ttc_stop = (
@@ -438,6 +531,7 @@ class LocalObstaclePlannerNode(Node):
                 max(self.obstacle_default_radius, observed_radius))
             observations.append((center, radius, s_value, lateral))
         self.update_obstacle_tracks(observations)
+        return True
 
     def update_obstacle_tracks(self, observations):
         now_seconds = self.get_clock().now().nanoseconds * 1e-9
@@ -454,29 +548,59 @@ class LocalObstaclePlannerNode(Node):
         return self.current_map_base_pose()[:2]
 
     def active_obstacles(self, vehicle_s):
+        planning_horizon = self.current_planning_horizon()
         active = []
         for obstacle in self.tracked_obstacles:
             if int(obstacle.get('hits', 1)) < self.obstacle_confirmation_frames:
                 continue
             forward = self.path_geometry.forward_distance(
                 vehicle_s, obstacle['s'])
-            if forward <= self.obstacle_lookahead:
+            if forward <= planning_horizon:
                 active.append((forward, obstacle))
         active.sort(key=lambda item: item[0])
         return active
 
-    def candidate_is_safe(self, points, vehicle_s, obstacles):
+    def current_planning_horizon(self):
+        # Plan for the commanded ceiling, not only the current odometry speed.
+        # Otherwise a vehicle accelerating from rest discovers that its
+        # previously short avoidance maneuver is infeasible only after it has
+        # already reached racing speed.
+        planning_speed = max(self.speed, self.maximum_planning_speed)
+        return speed_dependent_horizon(
+            planning_speed,
+            self.planning_reaction_time,
+            self.planning_deceleration,
+            self.planning_distance_margin,
+            self.obstacle_lookahead,
+            self.maximum_planning_horizon)
+
+    def current_avoidance_distances(self):
+        planning_speed = max(self.speed, self.maximum_planning_speed)
+        before = max(
+            self.avoidance_before,
+            min(self.maximum_avoidance_before,
+                planning_speed * self.avoidance_before_time))
+        after = max(
+            self.avoidance_after,
+            min(self.maximum_avoidance_after,
+                planning_speed * self.avoidance_after_time))
+        return before, after
+
+    def candidate_is_safe(
+            self, points, vehicle_s, obstacles, planning_horizon,
+            avoidance_after):
         local = sample_path_window(
             points,
             self.path_geometry,
             vehicle_s,
-            self.obstacle_lookahead + self.avoidance_after,
+            planning_horizon + avoidance_after,
             self.sample_spacing)
 
         map_values = self.map_clearances(local)
         minimum_map_clearance = float(np.min(map_values))
-        if minimum_map_clearance < self.map_clearance:
-            return False, minimum_map_clearance
+        map_extra_clearance = minimum_map_clearance - self.map_clearance
+        if map_extra_clearance < 0.0:
+            return False, map_extra_clearance
 
         minimum_obstacle_clearance = float('inf')
         for obstacle in obstacles:
@@ -491,7 +615,19 @@ class LocalObstaclePlannerNode(Node):
                 minimum_obstacle_clearance, minimum)
             if minimum < 0.0:
                 return False, minimum
-        return True, min(minimum_map_clearance, minimum_obstacle_clearance)
+        return True, min(map_extra_clearance, minimum_obstacle_clearance)
+
+    def candidate_curvature(self, points, vehicle_s, distance):
+        local = sample_path_window(
+            points, self.path_geometry, vehicle_s, distance,
+            max(self.sample_spacing, 0.05))
+        return path_curvature_percentile(
+            local, self.curvature_percentile)
+
+    def publish_speed_limit(self, value):
+        message = Float32()
+        message.data = float(max(0.0, value))
+        self.speed_limit_pub.publish(message)
 
     def publish_path(self, points):
         message = Path()
@@ -555,7 +691,11 @@ class LocalObstaclePlannerNode(Node):
             # Show the estimated physical obstacle only.  Collision checking
             # applies vehicle radius and safety margin separately below; they
             # must not make the RViz obstacle itself look larger.
-            diameter = 2.0 * obstacle['radius']
+            # Keep RViz close to the measured object footprint while collision
+            # checks below retain the full conservative radius.
+            diameter = (
+                2.0 * obstacle['radius']
+                * self.obstacle_marker_radius_scale)
             marker.scale.x = diameter
             marker.scale.y = diameter
             marker.scale.z = diameter
@@ -576,9 +716,12 @@ class LocalObstaclePlannerNode(Node):
 
     def plan(self):
         stop = Bool()
+        avoidance = Bool()
         if self.path_geometry is None or self.map_clearance_grid is None:
             stop.data = True
             self.stop_pub.publish(stop)
+            self.avoidance_pub.publish(avoidance)
+            self.publish_speed_limit(0.0)
             self.set_status('WAITING_FOR_GLOBAL_PATH_OR_MAP')
             return
         if (self.last_scan_time is None
@@ -586,6 +729,8 @@ class LocalObstaclePlannerNode(Node):
                 * 1e-9 > self.scan_timeout):
             stop.data = True
             self.stop_pub.publish(stop)
+            self.avoidance_pub.publish(avoidance)
+            self.publish_speed_limit(0.0)
             self.set_status('AEB_SCAN_TIMEOUT')
             return
 
@@ -594,10 +739,15 @@ class LocalObstaclePlannerNode(Node):
         except (TransformException, RuntimeError) as error:
             stop.data = True
             self.stop_pub.publish(stop)
+            self.avoidance_pub.publish(avoidance)
+            self.publish_speed_limit(0.0)
             self.set_status('AEB_TF_UNAVAILABLE: %s' % error)
             return
 
         vehicle_s, _, _ = self.path_geometry.project(vehicle_xy)
+        planning_horizon = self.current_planning_horizon()
+        avoidance_before, avoidance_after = (
+            self.current_avoidance_distances())
         active = self.active_obstacles(vehicle_s)
         selected = self.path_geometry.points
         selected_offset = 0.0
@@ -611,7 +761,7 @@ class LocalObstaclePlannerNode(Node):
                 self.locked_offset = None
             collision_obstacles = [
                 obstacle for forward, obstacle in active
-                if forward <= primary_forward + self.avoidance_after]
+                if forward <= primary_forward + avoidance_after]
             offsets = ordered_candidate_offsets(
                 self.candidate_offsets,
                 self.locked_offset,
@@ -621,13 +771,20 @@ class LocalObstaclePlannerNode(Node):
             for offset in offsets:
                 candidate = self.path_geometry.offset_bump(
                     primary['s'], offset,
-                    self.avoidance_before, self.avoidance_after)
+                    avoidance_before, avoidance_after)
                 safe, clearance = self.candidate_is_safe(
-                    candidate, vehicle_s, collision_obstacles)
-                candidate_results.append((offset, clearance))
+                    candidate, vehicle_s, collision_obstacles,
+                    planning_horizon, avoidance_after)
+                curvature = self.candidate_curvature(
+                    candidate, vehicle_s, planning_horizon)
+                candidate_results.append((offset, clearance, curvature))
                 if not safe:
                     continue
-                score = abs(offset) - 0.05 * min(clearance, 1.0)
+                score = (
+                    abs(offset)
+                    + self.candidate_curvature_weight * curvature
+                    - self.candidate_clearance_weight
+                    * min(max(clearance, 0.0), 1.0))
                 if self.locked_offset is not None:
                     score += 2.0 * abs(offset - self.locked_offset)
                 if score < best_score:
@@ -647,14 +804,39 @@ class LocalObstaclePlannerNode(Node):
         elif self.last_safe_path is not None:
             self.publish_path(self.last_safe_path)
 
-        stop.data = bool(self.ttc_stop or not feasible)
+        avoidance.data = bool(
+            feasible and active and abs(selected_offset) > 1e-3)
+        critical_distance = (
+            self.aeb_min_distance
+            + self.vehicle_clearance
+            + self.obstacle_default_radius
+            + self.obstacle_margin
+            + self.speed * self.aeb_critical_reaction_time)
+        critical_stop = bool(
+            self.ttc_stop
+            and self.nearest_corridor_distance < critical_distance)
+        stop.data = bool(critical_stop or not feasible)
         self.stop_pub.publish(stop)
+        self.avoidance_pub.publish(avoidance)
+        speed_limit = self.maximum_planning_speed
+        if avoidance.data:
+            selected_curvature = self.candidate_curvature(
+                selected, vehicle_s, planning_horizon)
+            curve_speed = math.sqrt(
+                self.max_lateral_acceleration
+                / max(selected_curvature, 1e-3))
+            speed_limit = min(speed_limit, max(
+                self.minimum_avoidance_speed, curve_speed))
+        if stop.data:
+            speed_limit = 0.0
+        self.publish_speed_limit(speed_limit)
         self.publish_markers(selected, active)
-        if self.ttc_stop:
+        if critical_stop:
             self.set_status('AEB_STOP')
         elif not feasible:
             details = ','.join(
-                '%+.2f:%+.2f' % result for result in candidate_results)
+                '%+.2f:clear=%+.2f:k=%.2f' % result
+                for result in candidate_results)
             self.set_status('NO_COLLISION_FREE_PATH ' + details)
         elif active and abs(selected_offset) > 1e-3:
             self.set_status(
@@ -669,11 +851,17 @@ class LocalObstaclePlannerNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = LocalObstaclePlannerNode()
+    # One worker may be evaluating path candidates while another waits for a
+    # timestamped scan transform.  Keep a third worker available so the TF
+    # listener can receive the transform that unblocks that lookup.
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -19,6 +19,12 @@ def _launch_setup(context):
     common_overrides = {
         'odom_topic': LaunchConfiguration('odom_topic').perform(context),
         'base_frame_id': LaunchConfiguration('base_frame_id').perform(context),
+        'maximum_planning_speed': float(LaunchConfiguration(
+            'maximum_planning_speed').perform(context)),
+        'max_lateral_acceleration': float(LaunchConfiguration(
+            'max_lateral_acceleration').perform(context)),
+        'planning_deceleration': float(LaunchConfiguration(
+            'planning_deceleration').perform(context)),
     }
     waypoint_overrides = {
         'waypoint_csv': LaunchConfiguration('waypoint_csv').perform(context),
@@ -66,5 +72,9 @@ def generate_launch_description():
             'odom_topic', default_value='/ego_racecar/odom'),
         DeclareLaunchArgument(
             'base_frame_id', default_value='ego_racecar/base_link'),
+        DeclareLaunchArgument('maximum_planning_speed', default_value='5.5'),
+        DeclareLaunchArgument(
+            'max_lateral_acceleration', default_value='1.50'),
+        DeclareLaunchArgument('planning_deceleration', default_value='4.0'),
         OpaqueFunction(function=_launch_setup),
     ])

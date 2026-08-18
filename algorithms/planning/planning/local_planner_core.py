@@ -28,6 +28,45 @@ def ordered_candidate_offsets(offsets, locked_offset, obstacle_lateral):
     return offsets
 
 
+def speed_dependent_horizon(
+        speed, reaction_time, deceleration, margin,
+        minimum, maximum):
+    """
+    Return a bounded perception/planning horizon for the current speed.
+
+    The distance is the reaction distance plus a constant-deceleration
+    stopping distance and a geometric planning margin.  It therefore scales
+    with vehicle dynamics instead of a particular map or obstacle position.
+    """
+    speed = max(0.0, float(speed))
+    deceleration = max(0.1, float(deceleration))
+    distance = (
+        speed * max(0.0, float(reaction_time))
+        + speed * speed / (2.0 * deceleration)
+        + max(0.0, float(margin)))
+    return max(float(minimum), min(distance, float(maximum)))
+
+
+def path_curvature_percentile(points, percentile=90.0):
+    """Estimate a robust absolute-curvature percentile of an XY polyline."""
+    points = np.asarray(points, dtype=float)
+    if len(points) < 4:
+        return 0.0
+    segments = np.diff(points, axis=0)
+    lengths = np.linalg.norm(segments, axis=1)
+    valid = lengths > 1e-5
+    if np.count_nonzero(valid) < 3:
+        return 0.0
+    headings = np.unwrap(np.arctan2(segments[:, 1], segments[:, 0]))
+    heading_delta = np.abs(np.diff(headings))
+    arc_span = 0.5 * (lengths[:-1] + lengths[1:])
+    valid_curvature = arc_span > 1e-5
+    curvature = heading_delta[valid_curvature] / arc_span[valid_curvature]
+    if len(curvature) == 0:
+        return 0.0
+    return float(np.percentile(curvature, np.clip(percentile, 0.0, 100.0)))
+
+
 class ClosedPathGeometry:
     """Arc-length representation of a non-self-intersecting closed path."""
 
@@ -50,7 +89,16 @@ class ClosedPathGeometry:
         self.cumulative = np.concatenate(([0.0], np.cumsum(lengths)))
         self.length = float(self.cumulative[-1])
         self.yaw = np.arctan2(segments[:, 1], segments[:, 0])
-        self.normals = np.column_stack((-np.sin(self.yaw), np.cos(self.yaw)))
+        self.segment_normals = np.column_stack(
+            (-np.sin(self.yaw), np.cos(self.yaw)))
+        unit_tangents = segments / lengths[:, None]
+        vertex_tangents = unit_tangents + np.roll(unit_tangents, 1, axis=0)
+        vertex_norms = np.linalg.norm(vertex_tangents, axis=1)
+        degenerate = vertex_norms < 1e-6
+        vertex_tangents[~degenerate] /= vertex_norms[~degenerate, None]
+        vertex_tangents[degenerate] = unit_tangents[degenerate]
+        self.normals = np.column_stack(
+            (-vertex_tangents[:, 1], vertex_tangents[:, 0]))
 
     def project(self, point):
         """Project an XY point and return s, signed lateral offset and distance."""
@@ -63,7 +111,8 @@ class ClosedPathGeometry:
         distances = np.linalg.norm(projections - point, axis=1)
         index = int(np.argmin(distances))
         projection = projections[index]
-        lateral = float(np.dot(point - projection, self.normals[index]))
+        lateral = float(np.dot(
+            point - projection, self.segment_normals[index]))
         s_value = (
             self.cumulative[index]
             + float(fractions[index]) * self.segment_lengths[index])
@@ -76,17 +125,30 @@ class ClosedPathGeometry:
             0.5 * self.length)
 
     def offset_bump(self, center_s, offset, before_distance, after_distance):
-        """Create a smooth lateral path offset around center_s."""
+        """
+        Create a minimum-jerk lateral path offset around center_s.
+
+        Quintic smoothstep has zero first and second derivative at both ends,
+        avoiding the steering-rate discontinuity of a piecewise linear shift.
+        """
         point_s = self.cumulative[:-1]
         delta = self.circular_delta(point_s, center_s)
         weights = np.zeros(len(self.points), dtype=float)
 
         before = (delta >= -before_distance) & (delta <= 0.0)
         after = (delta > 0.0) & (delta <= after_distance)
-        weights[before] = 0.5 * (
-            1.0 + np.cos(math.pi * delta[before] / before_distance))
-        weights[after] = 0.5 * (
-            1.0 + np.cos(math.pi * delta[after] / after_distance))
+        before_progress = np.clip(
+            (delta[before] + before_distance) / before_distance, 0.0, 1.0)
+        after_progress = np.clip(
+            delta[after] / after_distance, 0.0, 1.0)
+        weights[before] = (
+            10.0 * before_progress ** 3
+            - 15.0 * before_progress ** 4
+            + 6.0 * before_progress ** 5)
+        weights[after] = 1.0 - (
+            10.0 * after_progress ** 3
+            - 15.0 * after_progress ** 4
+            + 6.0 * after_progress ** 5)
         return self.points + self.normals * (offset * weights[:, None])
 
     def forward_distance(self, start_s, target_s):
@@ -158,7 +220,8 @@ def cluster_ordered_points(indexed_points, max_gap, min_points, max_diameter):
 def update_tracked_obstacles(
         tracks, observations, now_seconds, next_id, match_distance,
         memory_seconds):
-    """Update obstacle tracks with one-to-one scan associations.
+    """
+    Update obstacle tracks with one-to-one scan associations.
 
     A new scan cluster starts with one hit. Repeated spatially consistent
     observations increase ``hits``; missed tracks remain only for the short
