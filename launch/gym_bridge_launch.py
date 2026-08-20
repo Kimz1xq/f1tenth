@@ -141,6 +141,10 @@ def _launch_setup(context, config, config_dict):
                     get_package_share_directory('f1tenth_bringup'),
                     'config', 'amcl_common.yaml'),
                 {
+                    # Gym namespaces the simulated chassis frame.  Keep the
+                    # AMCL model common and adapt only the platform frame here.
+                    'base_frame_id': 'ego_racecar/base_link',
+                    'set_initial_pose': True,
                     # A new simulation run must use the selected track start,
                     # never the pose AMCL estimated immediately before a crash.
                     'always_reset_initial_pose': True,

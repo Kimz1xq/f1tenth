@@ -109,6 +109,12 @@ class ClosedLoopTest(Node):
     def vehicle_xy(self):
         if self.estimated_xy is not None:
             return self.estimated_xy
+        # AMCL publishes only after the robot moves.  During the stationary
+        # pre-start phase use simulator truth for test-harness readiness; the
+        # controller itself must still establish its configured TF before its
+        # enable service succeeds.
+        if self.ground_truth_xy is not None:
+            return self.ground_truth_xy
         transform = self.tf_buffer.lookup_transform(
             'map', 'ego_racecar/base_link', Time(),
             timeout=Duration(seconds=0.05))
@@ -182,18 +188,13 @@ def main():
             if time.monotonic() > deadline:
                 raise RuntimeError('Path or /control/enable service unavailable')
 
-        # DDS discovery for TF can complete after path/service discovery.
-        # Give the transform its own readiness window instead of sharing the
-        # already partially consumed startup deadline.
+        # Wait for the simulator measurement stream. AMCL does not necessarily
+        # emit a new pose while the vehicle is stationary.
         deadline = time.monotonic() + 8.0
-        while True:
+        while node.ground_truth_xy is None:
             rclpy.spin_once(node, timeout_sec=0.1)
-            try:
-                node.vehicle_xy()
-                break
-            except TransformException:
-                if time.monotonic() > deadline:
-                    raise RuntimeError('map -> ego_racecar/base_link unavailable')
+            if time.monotonic() > deadline:
+                raise RuntimeError('ground-truth odometry unavailable')
 
         if not args.already_enabled:
             print(node.set_enabled(True), flush=True)
