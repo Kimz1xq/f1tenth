@@ -3,13 +3,16 @@
 <package format="3">
   <name>f1tenth_bringup</name>
   <version>0.1.0</version>
-  <description>Single-command bringup for the F1TENTH simulation stack.</description>
+  <description>Shared simulation and physical F1TENTH autonomy bringup.</description>
   <maintainer email="jeonbotdae@example.com">jeonbotdae</maintainer>
   <license>MIT</license>
 
   <exec_depend>control</exec_depend>
   <exec_depend>f1tenth_gym_ros</exec_depend>
   <exec_depend>launch</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
   <exec_depend>planning</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
 

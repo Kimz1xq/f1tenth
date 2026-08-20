@@ -27,6 +27,10 @@ def _include(package, launch_file, arguments):
     )
 
 
+def _as_bool(value):
+    return str(value).lower() in ('1', 'true', 'yes', 'on')
+
+
 def _raceline_start_pose(csv_path):
     """
     Derive a simulator start pose from the selected raceline.
@@ -138,7 +142,11 @@ def _launch_setup(context, catalog_path, vehicle_path):
 
     if mode == 'real':
         controller = LaunchConfiguration('controller').perform(context)
-        return [
+        map_argument = LaunchConfiguration('map_yaml').perform(context)
+        map_yaml = (
+            f'/home/misys/shared_dir/maps/{track["map_name"]}.yaml'
+            if map_argument == 'auto' else map_argument)
+        actions = [
             LogInfo(msg=(
                 f'mode=real controller={controller} '
                 f'speed={requested_speed:.2f}m/s '
@@ -192,6 +200,15 @@ def _launch_setup(context, catalog_path, vehicle_path):
                 'emergency_stop_topic': '/safety/emergency_stop',
             }),
         ]
+        if _as_bool(LaunchConfiguration('localization').perform(context)):
+            actions.insert(1, _include(
+                'f1tenth_bringup', 'localization.launch.py', {
+                    'map_yaml': map_yaml,
+                    'base_frame_id': 'base_link',
+                    'odom_frame_id': 'odom',
+                    'scan_topic': '/scan',
+                }))
+        return actions
     if mode != 'sim':
         raise RuntimeError("mode must be 'sim' or 'real'")
 
@@ -291,6 +308,16 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('mode', default_value='sim'),
         DeclareLaunchArgument('track', default_value='track03'),
+        DeclareLaunchArgument(
+            'localization', default_value='true',
+            description=(
+                'Start map_server and shared AMCL automatically in real mode; '
+                'Gym owns them in sim mode')),
+        DeclareLaunchArgument(
+            'map_yaml', default_value='auto',
+            description=(
+                'Real map YAML; auto selects /home/misys/shared_dir/maps/'
+                '<track>.yaml')),
         DeclareLaunchArgument(
             'waypoint_csv', default_value='auto',
             description='auto selects the raceline for track'),

@@ -58,6 +58,13 @@ def main():
         'real_speed_topic' not in pure_pursuit_source
         and 'real_servo_topic' not in pure_pursuit_source,
         'Pure Pursuit still bypasses the common Ackermann adapter', failures)
+    for topic in (
+            '/safety/emergency_stop', '/planning/avoidance_active',
+            '/planning/speed_limit'):
+        require(
+            topic in pure_pursuit_source,
+            f'Pure Pursuit does not use common safety input {topic}',
+            failures)
     require(
         "'drive_topic': '/auto'" in (
             ROOT / 'algorithms/f1tenth_bringup/launch/autonomy.launch.py'
@@ -73,6 +80,12 @@ def main():
     require(
         "'config', 'amcl_common.yaml'" in gym_launch,
         'simulation does not load the shared AMCL model', failures)
+    real_localization = (
+        ROOT / 'algorithms/f1tenth_bringup/launch/localization.launch.py'
+    ).read_text(encoding='utf-8')
+    require(
+        "'config', 'amcl_common.yaml'" in real_localization,
+        'real mode does not load the shared AMCL model', failures)
 
     if failures:
         print('SIM2REAL CHECK: FAIL')

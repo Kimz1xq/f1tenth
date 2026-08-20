@@ -7,6 +7,9 @@ pure_pursuit_node:
     base_frame_id: "ego_racecar/base_link"
     odom_topic: "/ego_racecar/odom"
     path_topic: "/planning/path"
+    emergency_stop_topic: "/safety/emergency_stop"
+    avoidance_active_topic: "/planning/avoidance_active"
+    speed_limit_topic: "/planning/speed_limit"
 
     # One platform-neutral output in both modes. Gym or the onboard
     # ackermann_mux/VESC stack performs the final actuator conversion.
@@ -14,6 +17,9 @@ pure_pursuit_node:
 
     wheelbase: 0.324
     lookahead_distance: 0.70
+    lookahead_time: 0.20
+    minimum_lookahead_distance: 0.55
+    maximum_lookahead_distance: 2.50
     max_steering_angle: 0.4189
     max_path_distance: 1.00
     max_heading_error: 1.0472  # 60 deg
@@ -25,6 +31,9 @@ pure_pursuit_node:
     min_speed: 0.25
     max_speed: 0.80
     corner_slowdown_gain: 0.55
+    use_dynamic_speed_limit: true
+    speed_limit_timeout: 0.50
+    max_steering_rate: 3.2
 
     control_rate: 30.0
     odom_timeout: 0.50

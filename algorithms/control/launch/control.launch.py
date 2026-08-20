@@ -88,10 +88,14 @@ def _launch_setup(context):
                             'odom_topic').perform(context),
                         'drive_topic': LaunchConfiguration(
                             'drive_topic').perform(context),
+                        'emergency_stop_topic': LaunchConfiguration(
+                            'emergency_stop_topic').perform(context),
                         'wheelbase': float(LaunchConfiguration(
                             'wheelbase').perform(context)),
                         'max_steering_angle': float(LaunchConfiguration(
                             'max_steering_angle').perform(context)),
+                        'max_steering_rate': float(LaunchConfiguration(
+                            'max_steering_rate').perform(context)),
                         'target_speed': requested_speed,
                         'max_speed': requested_speed,
                         'min_speed': min(0.25, requested_speed),

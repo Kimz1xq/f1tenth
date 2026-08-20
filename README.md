@@ -82,11 +82,7 @@ source /home/misys/shared_dir/autonomy_ws/install/setup.bash
 ros2 launch f1tenth_stack bringup_launch.py
 ```
 
-map server와 AMCL은 공통 `amcl_common.yaml`을 사용합니다. 실차에서는
-`base_frame_id`만 `base_link`로 override하고 시작 자세는 RViz에서
-지정합니다.
-
-자율주행 터미널:
+터미널 2 — localization + planning + controller:
 
 ```bash
 cd /home/misys/shared_dir
@@ -94,6 +90,11 @@ cd /home/misys/shared_dir
   mode:=real track:=track03 controller:=unicorn_l1 \
   speed:=1.0 maximum_speed:=20.0
 ```
+
+이 명령이 map server와 공통 `amcl_common.yaml`도 자동 실행합니다. 별도의
+map server/AMCL lifecycle 명령은 입력하지 않습니다. 실차에서는
+`base_frame_id:=base_link`, `/odom`, `/auto` 어댑터만 자동 선택되며 시작
+자세는 RViz `2D Pose Estimate`로 지정합니다.
 
 실차 속도는 1 m/s부터 단계적으로 올립니다. `maximum_speed`는 소프트웨어
 명령 허용 상한일 뿐이며 VESC·배터리·모터·기어·타이어의 안전 한계를

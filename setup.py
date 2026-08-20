@@ -16,6 +16,8 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.xacro')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.rviz')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'maps'),
+         glob('maps/*.yaml') + glob('maps/*.pgm') + glob('maps/*.png')),
         (os.path.join('share', package_name, 'config'), glob('config/*.xml')),
         (os.path.join('share', package_name, 'maps'), glob('maps/*')),
     ],
