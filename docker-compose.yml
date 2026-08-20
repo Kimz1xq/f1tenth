@@ -19,6 +19,10 @@ services:
   sim:
     image: f1tenth_gym_ros
     build: ./
+    # Reap exited ROS children and forward container stop as Ctrl+C.
+    init: true
+    stop_signal: SIGINT
+    stop_grace_period: 15s
     volumes:
       - .:/sim_ws/src/f1tenth_gym_ros
       - ./algorithms/localization:/sim_ws/src/localization
@@ -29,6 +33,13 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     environment:
       - DISPLAY=${DISPLAY}
+      # Use the same ROS graph settings as the onboard vehicle for RViz/diagnostics.
+      - ROS_DOMAIN_ID=30
+      - ROS_LOCALHOST_ONLY=0
+      # CLI discovery is direct; no stale ros2 daemon survives a stopped run.
+      - ROS2CLI_NO_DAEMON=1
+      # Avoid stale Fast DDS SHM locks after Ctrl+C; simulation uses UDP only.
+      - FASTRTPS_DEFAULT_PROFILES_FILE=/sim_ws/src/f1tenth_gym_ros/config/fastdds_udp.xml
       - LIBGL_ALWAYS_SOFTWARE=1
       - MESA_GL_VERSION_OVERRIDE=3.3
       - MESA_GLSL_VERSION_OVERRIDE=330

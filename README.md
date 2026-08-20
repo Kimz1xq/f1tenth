@@ -1,6 +1,8 @@
 # F1TENTH 시뮬레이션
 
-실차에서 만든 지도 위에서 AMCL, 전역 경로, UNICORN L1, Linear MPC와 LiDAR 장애물 회피를 검증하는 ROS 2 Humble 환경입니다.
+실차에서 만든 지도 위에서 AMCL, 전역 경로, UNICORN L1, ForzaETH MAP,
+Linear MPC, Nonlinear MPCC와 LiDAR 장애물 회피를 검증하는 ROS 2 Humble
+환경입니다.
 
 - 실차 저장소: [Kimz1xq/f1tenth-onboard](https://github.com/Kimz1xq/f1tenth-onboard)
 - 시뮬레이터: [F1TENTH Gym ROS](https://github.com/f1tenth/f1tenth_gym_ros)
@@ -12,7 +14,7 @@
 
 ```text
 algorithms/planning           전역 경로와 LiDAR 로컬 회피
-algorithms/control            UNICORN L1, Linear MPC, Pure Pursuit
+algorithms/control            UNICORN L1, ForzaETH MAP, MPC/MPCC, Pure Pursuit
 algorithms/f1tenth_bringup     공통 autonomy launch
 ```
 
@@ -74,15 +76,20 @@ ros2 launch f1tenth_bringup autonomy.launch.py \
   obstacles:=true rviz:=true
 ```
 
-### 동적 회피 속도 제한 UNICORN L1
+### ForzaETH MAP 비교
 
 ```bash
 ros2 launch f1tenth_bringup autonomy.launch.py \
   mode:=sim track:=track03 \
-  controller:=unicorn_l1_dynamic \
+  controller:=forza_map \
   mpc_profile:=speed_3.0 \
-  obstacles:=true rviz:=true
+  obstacles:=false rviz:=true
 ```
+
+`steering_lookup_table:=auto`는 ForzaETH의 선형 자전거 모델 LUT를 사용합니다.
+현재 차량과 같은 약 0.33 m 휠베이스의 초기 실차 모델로도 선택되지만, 실차
+첫 검증은 반드시 `speed_1.0`부터 시작해야 합니다. 차량 식별로 만든 LUT가
+생기면 `steering_lookup_table:=<절대경로>`로 교체할 수 있습니다.
 
 ### Linear MPC 비교
 
@@ -93,6 +100,23 @@ ros2 launch f1tenth_bringup autonomy.launch.py \
   mpc_profile:=speed_3.0 \
   obstacles:=true rviz:=true
 ```
+
+### 고속 MPCC 시험
+
+`maximum_speed`는 소프트웨어 허용 상한이고 `mpc_profile`은 이번 시험의
+직선 목표속도입니다. 곡률·가속·제동·장애물 제한은 계속 적용됩니다.
+
+```bash
+ros2 launch f1tenth_bringup autonomy.launch.py \
+  mode:=sim track:=track03 \
+  controller:=mpcc \
+  mpc_profile:=speed_10.0 \
+  maximum_speed:=20.0 \
+  obstacles:=false rviz:=true
+```
+
+`track03`의 직선이 짧으면 10 m/s에 도달하기 전에 제동이 시작될 수 있습니다.
+이 경우 상한 문제가 아니라 가속거리와 곡률 기반 속도 프로파일의 결과입니다.
 
 주행 시작/정지:
 
@@ -108,8 +132,10 @@ ros2 service call /control/enable std_srvs/srv/SetBool "{data: false}"
 - `AMCL`: Nav2의 particle-filter 기반 2D map localization
 - 전역 경로: 지도 free-space에서 생성한 폐곡선 raceline CSV
 - `unicorn_l1`: [HMCL-UNIST UNICORN Racing Stack](https://github.com/HMCL-UNIST/unicorn-racing-stack)의 속도·곡률 기반 L1/Pure-Pursuit 전략을 ROS 2 Humble 인터페이스로 이식한 제어기
-- `unicorn_l1_dynamic`: 같은 L1 제어기에 로컬 플래너의 `/planning/speed_limit`을 추가 적용한 모드
+- `forza_map`: [ForzaETH Race Stack](https://github.com/ForzaETH/race_stack)의 MAP(Model- and Acceleration-based Pursuit) 조향 전략과 선형 자전거 모델 lookup table을 현재 ROS 2 인터페이스에 연결한 제어기
 - `mpc`: kinematic bicycle model을 선형화하여 경로 오차와 조향 입력을 최적화하는 저장소 내 Linear MPC 비교 구현
+- `mpcc`: nonlinear kinematic bicycle model, contour/lag error와 조향 변화율
+  제한을 사용하는 실험용 Nonlinear MPCC
 - 장애물 회피: `/scan`과 `/map`으로 정적 장애물을 추적하고 충돌하지 않는 offset 후보 경로를 선택하며 AEB를 별도로 적용
 
 UNICORN L1은 MPC가 아닙니다. 같은 지도, 경로, 속도, 장애물 seed로 제어기별 lap time, CTE, 충돌, safety stop 횟수를 비교합니다.
@@ -140,6 +166,29 @@ map -> odom -> ego_racecar/base_link -> ego_racecar/laser
 ros2 service call /simulation/randomize_obstacles std_srvs/srv/Trigger "{}"
 ros2 service call /simulation/clear_obstacles std_srvs/srv/Trigger "{}"
 ```
+
+대형 고속 오벌(`180 x 110 m`, 직선 80 m, 코너 중심 반경 40 m)에서
+10 m/s 속도 영역을 확인할 때:
+
+```bash
+cd /sim_ws/src/f1tenth_gym_ros
+./run_autonomy.sh \
+  mode:=sim \
+  track:=high_speed_test \
+  controller:=unicorn_l1 \
+  mpc_profile:=speed_10.0 \
+  maximum_speed:=20.0 \
+  max_lateral_acceleration:=4.0 \
+  obstacles:=false \
+  rviz:=true
+```
+
+이 맵은 최고속도 검증용입니다. 좁은 코스 및 장애물 회피 검증에는
+기존 `track03`을 계속 사용합니다.
+
+시뮬레이션의 `amcl_odom_noise:=auto`는 Gym이 상태값을 그대로 발행하는
+저잡음 odometry에 맞춰집니다. 다른 odometry 모델을 비교할 때만
+`amcl_odom_noise:=<측정값>`으로 바꾸며, 맵마다 값을 만들지 않습니다.
 
 ## 새 맵 적용
 

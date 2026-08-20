@@ -73,7 +73,10 @@ bridge:
     random_obstacle_seed: -1
     randomize_obstacles_on_reset: false
     randomize_obstacles_on_lap: true
-    obstacle_path_csv: '/sim_ws/src/planning/waypoints/track03_centerline.csv'
+    # Simulation crash testing: report contact but keep accepting /drive.
+    # Physical-car safety is configured independently in onboard bringup.
+    stop_vehicle_on_collision: false
+    obstacle_path_csv: '/sim_ws/src/planning/waypoints/track03_raceline.csv'
     obstacle_length: 0.20
     obstacle_width: 0.12
     obstacle_height: 0.20
@@ -81,9 +84,16 @@ bridge:
     obstacle_start_clearance: 1.50
     obstacle_min_spacing: 3.00
     obstacle_passage_offset: 0.18
-    # Match the local planner's map_clearance so every generated obstacle has
-    # at least one passage that the planner can actually accept.
-    obstacle_passage_radius: 0.19
+    # Effective half width (0.155 m) + tracking buffer (0.05 m) + wall margin.
+    # This validates passage width only; it does not change obstacle size.
+    obstacle_passage_radius: 0.23
     obstacle_marker_topic: '/simulation/obstacles_ground_truth'
     vehicle_length: 0.58
     vehicle_width: 0.31
+    wheelbase: 0.33
+    max_steering_angle: 0.4189
+    # Random layouts must admit a smooth, footprint-safe Ackermann passage.
+    # These are geometry checks for the simulator fixture, not planner inputs.
+    obstacle_feasibility_before: 4.0
+    obstacle_feasibility_after: 4.0
+    obstacle_feasibility_wall_margin: 0.02

@@ -14,8 +14,10 @@ import math
 
 import numpy as np
 import rclpy
+from rclpy._rclpy_pybind11 import RCLError
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.duration import Duration
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
 
@@ -28,8 +30,58 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 
+def build_closed_velocity_profile(
+        curvature, segment_lengths, maximum_speed,
+        maximum_lateral_acceleration, maximum_acceleration,
+        maximum_deceleration):
+    """
+    Return a closed-loop, dynamics-limited speed profile.
+
+    Lateral limits follow ``a_y = v^2 * kappa``.  Repeated forward and
+    backward passes then make every transition reachable under the configured
+    acceleration and braking limits.  This is the same separation used by
+    global raceline optimizers: path geometry first, velocity profile second.
+    """
+    curvature = np.abs(np.asarray(curvature, dtype=float))
+    segment_lengths = np.asarray(segment_lengths, dtype=float)
+    if (len(curvature) == 0
+            or len(curvature) != len(segment_lengths)):
+        raise ValueError('curvature and segment lengths must be non-empty')
+
+    maximum_speed = max(0.0, float(maximum_speed))
+    lateral = max(1e-3, float(maximum_lateral_acceleration))
+    acceleration = max(1e-3, float(maximum_acceleration))
+    deceleration = max(1e-3, float(maximum_deceleration))
+    profile = np.minimum(
+        maximum_speed,
+        np.sqrt(lateral / np.maximum(curvature, 1e-4)))
+
+    # A few complete circular sweeps are sufficient for constraints to cross
+    # the array boundary while keeping path-update cost deterministic.
+    count = len(profile)
+    for _ in range(4):
+        for index in range(count):
+            next_index = (index + 1) % count
+            reachable = math.sqrt(max(
+                0.0,
+                profile[index] ** 2
+                + 2.0 * acceleration * segment_lengths[index]))
+            profile[next_index] = min(profile[next_index], reachable)
+        for index in range(count - 1, -1, -1):
+            next_index = (index + 1) % count
+            reachable = math.sqrt(max(
+                0.0,
+                profile[next_index] ** 2
+                + 2.0 * deceleration * segment_lengths[index]))
+            profile[index] = min(profile[index], reachable)
+    return profile
+
+
 class UnicornL1Node(Node):
     """L1/Pure-Pursuit tracker using UNICORN's adaptive guidance strategy."""
+
+    controller_label = 'UNICORN L1'
+    topic_prefix = '/unicorn_l1'
 
     def __init__(self):
         super().__init__('unicorn_l1_node')
@@ -37,6 +89,7 @@ class UnicornL1Node(Node):
         self.declare_parameter('enabled', False)
         self.declare_parameter('solve_when_disabled', True)
         self.declare_parameter('global_frame_id', 'map')
+        self.declare_parameter('odom_frame_id', 'odom')
         self.declare_parameter('base_frame_id', 'ego_racecar/base_link')
         self.declare_parameter('odom_topic', '/ego_racecar/odom')
         self.declare_parameter('path_topic', '/planning/path')
@@ -49,7 +102,6 @@ class UnicornL1Node(Node):
         self.declare_parameter('speed_limit_topic', '/planning/speed_limit')
         self.declare_parameter('speed_limit_timeout', 0.50)
         self.declare_parameter('use_dynamic_speed_limit', False)
-
         self.declare_parameter('wheelbase', 0.33)
         self.declare_parameter('control_rate', 50.0)
         self.declare_parameter('target_speed', 1.0)
@@ -74,6 +126,10 @@ class UnicornL1Node(Node):
         self.declare_parameter('future_constant', 0.05)
         self.declare_parameter('curvature_window_start', 0.50)
         self.declare_parameter('curvature_window_end', 1.50)
+        # Read the spatial speed profile ahead of the current pose so braking
+        # begins before the L1 steering transition, especially when an
+        # occluded static obstacle first becomes visible near a bend.
+        self.declare_parameter('speed_lookahead', 0.25)
         self.declare_parameter('lat_err_coeff', 1.0)
         self.declare_parameter('speed_factor_for_lat_err', 1.0)
         self.declare_parameter('speed_factor_for_curvature', 1.0)
@@ -82,6 +138,11 @@ class UnicornL1Node(Node):
         self.declare_parameter('heading_filter_alpha', 0.10)
         self.declare_parameter('heading_gain_speed', 15.0)
         self.declare_parameter('heading_slowdown_threshold_deg', 10.0)
+        # Upstream UNICORN reduces steering gain continuously at racing speed.
+        # This depends on vehicle speed, not on a track coordinate or map.
+        self.declare_parameter('start_scale_speed', 6.5)
+        self.declare_parameter('end_scale_speed', 10.0)
+        self.declare_parameter('downscale_factor', 0.5)
 
         self.declare_parameter('max_path_distance', 0.80)
         self.declare_parameter('max_heading_error', 1.0472)
@@ -92,7 +153,8 @@ class UnicornL1Node(Node):
 
         for name in (
                 'enabled', 'solve_when_disabled', 'global_frame_id',
-                'base_frame_id', 'odom_topic', 'path_topic', 'drive_topic',
+                'odom_frame_id', 'base_frame_id', 'odom_topic', 'path_topic',
+                'drive_topic',
                 'collision_topic', 'emergency_stop_topic',
                 'avoidance_active_topic', 'speed_limit_topic',
                 'use_dynamic_speed_limit'):
@@ -107,10 +169,12 @@ class UnicornL1Node(Node):
                 'max_steering_delta', 't_clip_min', 't_clip_max', 'm_l1',
                 'q_l1', 'curvature_factor', 'future_constant',
                 'curvature_window_start', 'curvature_window_end',
+                'speed_lookahead',
                 'lat_err_coeff', 'speed_factor_for_lat_err',
                 'speed_factor_for_curvature', 'heading_kp', 'heading_kd',
                 'heading_filter_alpha', 'heading_gain_speed',
-                'heading_slowdown_threshold_deg', 'max_path_distance',
+                'heading_slowdown_threshold_deg', 'start_scale_speed',
+                'end_scale_speed', 'downscale_factor', 'max_path_distance',
                 'max_heading_error', 'odom_timeout', 'path_timeout',
                 'speed_limit_timeout'):
             setattr(self, name, float(self.get_parameter(name).value))
@@ -136,7 +200,11 @@ class UnicornL1Node(Node):
                 'longitudinal acceleration limits must be positive')
         if self.avoidance_speed_limit <= 0.0:
             raise RuntimeError('avoidance_speed_limit must be positive')
-
+        if self.end_scale_speed <= self.start_scale_speed:
+            raise RuntimeError(
+                'end_scale_speed must be greater than start_scale_speed')
+        if not 0.0 <= self.downscale_factor <= 1.0:
+            raise RuntimeError('downscale_factor must be between 0 and 1')
         self.current_odom = None
         self.last_odom_time = None
         self.last_path_time = None
@@ -148,9 +216,11 @@ class UnicornL1Node(Node):
         self.path_points = None
         self.path_yaw = None
         self.path_curvature = None
+        self.path_speed_curvature = None
         self.path_segment_lengths = None
         self.path_cumulative = None
         self.path_length = None
+        self.path_speed_profile = None
         self.yaw_lap_change = None
         self.nearest_index = None
         self.previous_steering = 0.0
@@ -164,9 +234,21 @@ class UnicornL1Node(Node):
         self.tf_buffer = Buffer(cache_time=Duration(seconds=5.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        # Keep odometry reception independent from path processing and the
+        # control loop.  With one default mutually-exclusive callback group,
+        # a busy control callback can make fresh 40 Hz odometry look stale.
+        self.odom_callback_group = MutuallyExclusiveCallbackGroup()
+        self.control_callback_group = MutuallyExclusiveCallbackGroup()
+
+        # Control needs the newest odometry sample, never a queued history.
+        # A depth-10 queue can make the pose several control cycles old when
+        # scan processing and RViz are active.
         self.create_subscription(
-            Odometry, self.odom_topic, self.odom_callback, 10)
-        self.create_subscription(Path, self.path_topic, self.path_callback, 10)
+            Odometry, self.odom_topic, self.odom_callback, 1,
+            callback_group=self.odom_callback_group)
+        # The local planner can update at 20 Hz. Old paths are unsafe once a
+        # newer obstacle estimate exists, so retain only the latest message.
+        self.create_subscription(Path, self.path_topic, self.path_callback, 1)
         self.create_subscription(
             Bool, self.collision_topic, self.collision_callback, 10)
         self.create_subscription(
@@ -182,17 +264,20 @@ class UnicornL1Node(Node):
         self.drive_pub = self.create_publisher(
             AckermannDriveStamped, self.drive_topic, 10)
         self.proposed_drive_pub = self.create_publisher(
-            AckermannDriveStamped, '/unicorn_l1/proposed_drive', 10)
+            AckermannDriveStamped,
+            self.topic_prefix + '/proposed_drive', 10)
         self.marker_pub = self.create_publisher(
-            MarkerArray, '/unicorn_l1/markers', 10)
+            MarkerArray, self.topic_prefix + '/markers', 10)
         self.enable_service = self.create_service(
             SetBool, '/control/enable', self.enable_callback)
         self.timer = self.create_timer(
-            self.control_dt, self.control_loop)
+            self.control_dt, self.control_loop,
+            callback_group=self.control_callback_group)
 
         self.get_logger().info(
-            'UNICORN L1 ready (enabled=%s, rate=%.1fHz, target=%.2fm/s)'
-            % (self.enabled, control_rate, self.target_speed))
+            '%s ready (enabled=%s, rate=%.1fHz, target=%.2fm/s)'
+            % (self.controller_label, self.enabled, control_rate,
+               self.target_speed))
         self.get_logger().info(
             'Humble adapter: nav_msgs/Path + TF -> Ackermann /drive '
             '(dynamic_speed_limit=%s)' % self.use_dynamic_speed_limit)
@@ -225,7 +310,8 @@ class UnicornL1Node(Node):
             self.previous_command_speed = 0.0
             self.publish_stop()
             self.get_logger().error(
-                'UNICORN L1 disabled: collision input is active')
+                self.controller_label
+                + ' disabled: collision input is active')
 
     def emergency_stop_callback(self, message):
         self.emergency_stop = bool(message.data)
@@ -253,16 +339,23 @@ class UnicornL1Node(Node):
             points = points[:-1]
         if len(points) < 4:
             return
+        previous_count = (
+            None if self.path_points is None else len(self.path_points))
         changed = (
-            self.path_points is None
+            previous_count is None
             or len(points) != len(self.path_points)
             or np.max(np.abs(points - self.path_points)) > 1e-6)
         if changed:
             self.set_closed_path(points)
-            self.nearest_index = None
+            # A local obstacle planner updates the coordinates of the same
+            # closed path as scan estimates settle. Preserve progress when
+            # the topology is unchanged; a full-search reset at every scan
+            # can jump to a nearby branch and create steering chatter.
+            if previous_count != len(points):
+                self.nearest_index = None
             self.get_logger().info(
-                'UNICORN L1 received closed path: %d points, %.2f m'
-                % (len(points), self.path_length),
+                '%s received closed path: %d points, %.2f m'
+                % (self.controller_label, len(points), self.path_length),
                 throttle_duration_sec=2.0)
         self.last_path_time = self.get_clock().now()
 
@@ -289,13 +382,30 @@ class UnicornL1Node(Node):
 
         self.path_points = points
         self.path_yaw = yaw
+        yaw_span = np.arctan2(
+            np.sin(next_yaw - previous_yaw),
+            np.cos(next_yaw - previous_yaw))
         self.path_curvature = (
-            (next_yaw - previous_yaw) / np.maximum(arc_span, 1e-6))
+            yaw_span / np.maximum(arc_span, 1e-6))
+        # The Path message has no curvature field.  A short circular moving
+        # average suppresses waypoint-discretization spikes without using any
+        # map coordinate or corner-specific rule.
+        self.path_speed_curvature = np.mean([
+            np.roll(self.path_curvature, offset) for offset in range(-2, 3)
+        ], axis=0)
         self.path_segment_lengths = segment_lengths
         self.path_cumulative = np.concatenate(
             ([0.0], np.cumsum(segment_lengths)))
         self.path_length = float(self.path_cumulative[-1])
         self.yaw_lap_change = float(yaw_lap_change)
+        self.path_speed_profile = build_closed_velocity_profile(
+            self.path_speed_curvature,
+            self.path_segment_lengths,
+            self.max_speed,
+            self.max_lateral_acceleration,
+            self.max_longitudinal_acceleration,
+            self.max_longitudinal_deceleration,
+        )
 
     def age_seconds(self, stamp):
         if stamp is None:
@@ -318,14 +428,32 @@ class UnicornL1Node(Node):
         return None
 
     def lookup_vehicle_pose(self):
-        transform = self.tf_buffer.lookup_transform(
-            self.global_frame_id, self.base_frame_id, Time(),
+        # Looking up map->base_link as one TF chain uses the latest *common*
+        # timestamp.  AMCL publishes map->odom more slowly than wheel odometry,
+        # so that lookup can return a vehicle pose almost one metre behind at
+        # racing speed.  Treat map->odom as the latest localization correction
+        # and compose it with the latest odom->base_link motion instead.  This
+        # is frame-generic and matches the way a localization + odometry stack
+        # is intended to feed a high-rate controller.
+        map_from_odom = self.tf_buffer.lookup_transform(
+            self.global_frame_id, self.odom_frame_id, Time(),
             timeout=Duration(seconds=0.03))
-        translation = transform.transform.translation
+        map_translation = map_from_odom.transform.translation
+        odom_pose = self.current_odom.pose.pose
+        odom_translation = odom_pose.position
+        map_yaw = self.quaternion_to_yaw(
+            map_from_odom.transform.rotation)
+        odom_yaw = self.quaternion_to_yaw(odom_pose.orientation)
+        cosine = math.cos(map_yaw)
+        sine = math.sin(map_yaw)
         return (
-            translation.x,
-            translation.y,
-            self.quaternion_to_yaw(transform.transform.rotation),
+            map_translation.x
+            + cosine * odom_translation.x
+            - sine * odom_translation.y,
+            map_translation.y
+            + sine * odom_translation.x
+            + cosine * odom_translation.y,
+            self.angle_difference(map_yaw + odom_yaw, 0.0),
         )
 
     def candidate_indices(self):
@@ -338,9 +466,11 @@ class UnicornL1Node(Node):
                                 self.search_forward_points + 1)
         ]
 
-    def nearest_path_state(self, x, y, update_index=False):
+    def nearest_path_state(
+            self, x, y, update_index=False, reference_yaw=None):
         position = np.asarray([x, y])
         best = None
+        best_forward = None
         count = len(self.path_points)
         indices = self.candidate_indices() if update_index else range(count)
         for index in indices:
@@ -358,6 +488,20 @@ class UnicornL1Node(Node):
             if best is None or distance < best[0]:
                 best = candidate
 
+            # A forward-only Ackermann vehicle cannot be following a path
+            # segment whose tangent points behind it.  Prefer a directionally
+            # compatible projection when nearby track branches run alongside
+            # each other in opposite directions.  Fall back to pure distance
+            # only when no forward segment exists in the search window.
+            if (reference_yaw is not None
+                    and math.cos(self.angle_difference(
+                        float(self.path_yaw[index]), reference_yaw)) > 0.0
+                    and (best_forward is None
+                         or distance < best_forward[0])):
+                best_forward = candidate
+
+        if best_forward is not None:
+            best = best_forward
         distance, index, fraction, projection = best
         path_s = (
             self.path_cumulative[index]
@@ -380,7 +524,7 @@ class UnicornL1Node(Node):
 
     def compute_command(self, x, y, yaw, speed):
         _, distance, path_heading, path_s, _ = self.nearest_path_state(
-            x, y, update_index=True)
+            x, y, update_index=True, reference_yaw=yaw)
         heading_error = self.angle_difference(path_heading, yaw)
         if distance > self.max_path_distance:
             raise RuntimeError(
@@ -399,7 +543,7 @@ class UnicornL1Node(Node):
         future_yaw = yaw + (
             speed / self.wheelbase * math.sin(beta) * self.future_constant)
         _, _, _, future_s, future_lateral_error = self.nearest_path_state(
-            future_x, future_y)
+            future_x, future_y, reference_yaw=future_yaw)
 
         curvature_s = np.linspace(
             future_s + self.curvature_window_start,
@@ -408,8 +552,52 @@ class UnicornL1Node(Node):
         mean_curvature = float(np.mean(np.abs(self.interpolate_path(
             self.path_curvature, curvature_s))))
 
-        speed_for_l1 = self.clamp(
-            self.target_speed, max(0.0, speed - 1.0), speed + 1.0)
+        # The upstream UNICORN controller reads the local raceline speed before
+        # calculating L1.  Use this path's dynamics-limited speed profile as
+        # the ROS Path equivalent; the launch target is only the straight-line
+        # ceiling and must not lengthen L1 inside a slower corner.
+        speed_horizon = max(
+            0.25, max(0.0, speed) * self.speed_lookahead)
+        speed_sample_s = np.linspace(
+            future_s, future_s + speed_horizon, 16)
+        command_speed = float(np.min(self.interpolate_path(
+            self.path_speed_profile, speed_sample_s)))
+        curvature_norm = self.clamp(
+            2.0 * (mean_curvature / 0.8) - 2.0, 0.0, 1.0)
+        curvature_norm *= self.speed_factor_for_curvature
+        lateral_norm = self.clamp(
+            abs(future_lateral_error), 0.0, 1.0)
+        lateral_norm *= self.speed_factor_for_lat_err
+        command_speed *= (
+            1.0 - self.lat_err_coeff
+            + self.lat_err_coeff
+            * math.exp(-lateral_norm * curvature_norm))
+        threshold = math.radians(self.heading_slowdown_threshold_deg)
+        if abs(heading_error) >= threshold:
+            if abs(heading_error) < math.pi / 2.0:
+                command_speed *= (
+                    1.0 - 0.5 * abs(heading_error) / (math.pi / 2.0))
+            else:
+                command_speed *= 0.5
+        command_speed = self.clamp(
+            command_speed, self.min_reference_speed, self.max_speed)
+        if command_speed > 0.0:
+            command_speed = max(command_speed, self.min_command_speed)
+        if self.avoidance_active:
+            avoidance_limit = self.avoidance_speed_limit
+            if (self.use_dynamic_speed_limit
+                    and self.dynamic_speed_limit is not None
+                    and self.age_seconds(self.last_speed_limit_time)
+                    <= self.speed_limit_timeout):
+                avoidance_limit = min(
+                    avoidance_limit, self.dynamic_speed_limit)
+            command_speed = min(command_speed, avoidance_limit)
+
+        if speed < 2.0:
+            speed_for_l1 = self.clamp(
+                command_speed, max(0.0, speed - 1.0), speed + 1.0)
+        else:
+            speed_for_l1 = speed
         curvature_scaler = (
             self.curvature_factor * mean_curvature * speed * speed)
         raw_l1 = self.m_l1 * speed_for_l1 - curvature_scaler + self.q_l1
@@ -426,28 +614,49 @@ class UnicornL1Node(Node):
         vector_x = target_x - future_x
         vector_y = target_y - future_y
         vector_norm = max(math.hypot(vector_x, vector_y), 1e-6)
-        eta = self.angle_difference(
-            math.atan2(vector_y, vector_x), future_yaw)
+        eta = math.asin(self.clamp(
+            (-math.sin(future_yaw) * vector_x
+             + math.cos(future_yaw) * vector_y) / vector_norm,
+            -1.0, 1.0))
         steering = math.atan(
-            2.0 * self.wheelbase * math.sin(eta) / vector_norm)
+            2.0 * self.wheelbase * math.sin(eta)
+            / max(l1_distance, 1e-6))
 
         # UNICORN's filtered, speed-scaled heading correction.
         if self.filtered_heading_error is None:
             self.filtered_heading_error = eta
-        alpha = self.clamp(self.heading_filter_alpha, 0.0, 1.0)
-        self.filtered_heading_error = (
-            alpha * eta + (1.0 - alpha) * self.filtered_heading_error)
+        else:
+            alpha = self.clamp(self.heading_filter_alpha, 0.0, 1.0)
+            # Heading is circular. Filtering +179 and -179 degrees as plain
+            # numbers points toward zero and can reverse steering at the wrap.
+            self.filtered_heading_error = self.angle_difference(
+                self.filtered_heading_error
+                + alpha * self.angle_difference(
+                    eta, self.filtered_heading_error),
+                0.0)
         gain = self.heading_kp * self.clamp(
             speed / max(self.heading_gain_speed, 1e-3), 0.0, 1.0)
         derivative = 0.0
         if self.previous_heading_error is not None:
-            derivative = (
-                self.filtered_heading_error - self.previous_heading_error)
+            derivative = self.angle_difference(
+                self.filtered_heading_error, self.previous_heading_error)
             derivative /= self.control_dt
         self.previous_heading_error = self.filtered_heading_error
         steering += (
             gain * self.filtered_heading_error
             + self.heading_kd * derivative)
+
+        # Match UNICORN's speed-dependent steering scaling. At high speed the
+        # same steering angle produces much larger lateral acceleration, so
+        # retaining the low-speed gain causes alternating over-correction on
+        # otherwise straight paths.
+        scale_speed_range = max(
+            0.1, self.end_scale_speed - self.start_scale_speed)
+        speed_scale_progress = self.clamp(
+            (command_speed - self.start_scale_speed) / scale_speed_range,
+            0.0, 1.0)
+        steering *= (
+            1.0 - speed_scale_progress * self.downscale_factor)
 
         # Match UNICORN's lateral-error steering scaling and steering slew cap.
         steering *= math.exp(math.log(2.0) * abs(future_lateral_error))
@@ -458,58 +667,23 @@ class UnicornL1Node(Node):
         steering = self.clamp(
             steering, -self.max_steering_angle, self.max_steering_angle)
 
-        # The upstream stack gets base speed from its optimized raceline.  Here
-        # the launch speed is the cap, then the same heading/lateral-curvature
-        # reductions are applied to remain compatible with nav_msgs/Path.
-        curvature_norm = self.clamp(
-            2.0 * (mean_curvature / 0.8) - 2.0, 0.0, 1.0)
-        curvature_norm *= self.speed_factor_for_curvature
-        lateral_norm = self.clamp(
-            abs(future_lateral_error), 0.0, 1.0)
-        lateral_norm *= self.speed_factor_for_lat_err
-        command_speed = self.target_speed * (
-            1.0 - self.lat_err_coeff
-            + self.lat_err_coeff
-            * math.exp(-lateral_norm * curvature_norm))
-        threshold = math.radians(self.heading_slowdown_threshold_deg)
-        if abs(heading_error) >= threshold:
-            if abs(heading_error) < math.pi / 2.0:
-                command_speed *= (
-                    1.0 - 0.5 * abs(heading_error) / (math.pi / 2.0))
-            else:
-                command_speed *= 0.5
-        # Generic curvature speed cap from lateral acceleration a_y=v^2*kappa.
-        # This reaches target_speed on straights and anticipates turns using
-        # the same forward curvature window as the L1-distance calculation.
-        curve_speed = math.sqrt(
-            self.max_lateral_acceleration
-            / max(mean_curvature, 1e-3))
-        command_speed = min(command_speed, curve_speed)
-        command_speed = self.clamp(
-            command_speed, self.min_reference_speed, self.max_speed)
-        if command_speed > 0.0:
-            command_speed = max(command_speed, self.min_command_speed)
-        if self.avoidance_active:
-            avoidance_limit = self.avoidance_speed_limit
-            if (self.use_dynamic_speed_limit
-                    and self.dynamic_speed_limit is not None
-                    and self.age_seconds(self.last_speed_limit_time)
-                    <= self.speed_limit_timeout):
-                avoidance_limit = min(
-                    avoidance_limit, self.dynamic_speed_limit)
-            command_speed = min(command_speed, avoidance_limit)
-
         return command_speed, steering, (
             future_x, future_y, target_x, target_y, l1_distance,
             mean_curvature, distance)
 
     def publish_ackermann(self, publisher, speed, steering):
+        if not rclpy.ok():
+            return
         message = AckermannDriveStamped()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = self.base_frame_id
         message.drive.speed = float(speed)
         message.drive.steering_angle = float(steering)
-        publisher.publish(message)
+        try:
+            publisher.publish(message)
+        except RCLError:
+            if rclpy.ok():
+                raise
 
     def publish_stop(self):
         self.publish_ackermann(self.drive_pub, 0.0, 0.0)
@@ -558,7 +732,13 @@ class UnicornL1Node(Node):
             Point(x=target_x, y=target_y, z=0.08),
         ]
         message.markers.append(line)
-        self.marker_pub.publish(message)
+        if not rclpy.ok():
+            return
+        try:
+            self.marker_pub.publish(message)
+        except RCLError:
+            if rclpy.ok():
+                raise
 
     def warn_throttled(self, message):
         now = self.get_clock().now()
@@ -577,20 +757,22 @@ class UnicornL1Node(Node):
             self.previous_command_speed = 0.0
             self.publish_stop()
             response.success = True
-            response.message = 'UNICORN L1 stopped'
+            response.message = self.controller_label + ' stopped'
             self.get_logger().info(response.message)
             return response
 
         problem = self.readiness_problem()
         if problem is not None:
             response.success = False
-            response.message = 'Cannot start UNICORN L1: ' + problem
+            response.message = (
+                'Cannot start ' + self.controller_label + ': ' + problem)
             self.get_logger().error(response.message)
             return response
         if not self.last_solution_ok:
             response.success = False
             response.message = (
-                'Cannot start UNICORN L1: no valid dry-run command yet')
+                'Cannot start ' + self.controller_label
+                + ': no valid dry-run command yet')
             self.get_logger().error(response.message)
             return response
 
@@ -598,7 +780,7 @@ class UnicornL1Node(Node):
             0.0, float(self.current_odom.twist.twist.linear.x))
         self.enabled = True
         response.success = True
-        response.message = 'UNICORN L1 enabled'
+        response.message = self.controller_label + ' enabled'
         self.get_logger().info(response.message)
         return response
 
@@ -608,7 +790,8 @@ class UnicornL1Node(Node):
             self.last_solution_ok = False
             self.publish_stop()
             if self.enabled:
-                self.warn_throttled('UNICORN L1 safety stop: ' + problem)
+                self.warn_throttled(
+                    self.controller_label + ' safety stop: ' + problem)
             return
         if not self.enabled and not self.solve_when_disabled:
             self.publish_stop()
@@ -643,7 +826,8 @@ class UnicornL1Node(Node):
             self.last_solution_ok = False
             self.previous_command_speed = 0.0
             self.publish_stop()
-            self.warn_throttled('UNICORN L1 safety stop: ' + str(error))
+            self.warn_throttled(
+                self.controller_label + ' safety stop: ' + str(error))
 
 
 def main(args=None):
@@ -653,15 +837,18 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass
     finally:
-        executor.shutdown()
-        if rclpy.ok():
-            node.publish_stop()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            executor.shutdown()
+            if rclpy.ok():
+                node.publish_stop()
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        except (KeyboardInterrupt, RCLError):
+            pass
 
 
 if __name__ == '__main__':

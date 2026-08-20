@@ -38,7 +38,14 @@ amcl:
     update_min_a: 0.05
     save_pose_rate: 0.5
 
-    laser_model_type: likelihood_field
+    # The course contains unmapped static obstacles. Use Nav2 AMCL's
+    # likelihood-field model with beam skipping so those outlier beams do not
+    # drag the map->odom estimate away from the mapped walls.
+    laser_model_type: likelihood_field_prob
+    do_beamskip: true
+    beam_skip_distance: 0.5
+    beam_skip_threshold: 0.3
+    beam_skip_error_threshold: 0.9
     max_beams: 60
     laser_min_range: 0.0
     laser_max_range: 30.0

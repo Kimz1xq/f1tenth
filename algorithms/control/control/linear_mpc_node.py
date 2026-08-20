@@ -14,6 +14,7 @@ import cvxpy as cp
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.time import Time
 
@@ -26,15 +27,18 @@ from tf2_ros import Buffer, TransformException, TransformListener
 
 
 class LinearMpcNode(Node):
+    NODE_NAME = 'linear_mpc_node'
+    DISPLAY_NAME = 'Linear MPC'
     STATE_SIZE = 4  # x, y, speed, yaw
     INPUT_SIZE = 2  # acceleration, steering angle
 
     def __init__(self):
-        super().__init__('linear_mpc_node')
+        super().__init__(self.NODE_NAME)
 
         self.declare_parameter('enabled', False)
         self.declare_parameter('solve_when_disabled', True)
         self.declare_parameter('global_frame_id', 'map')
+        self.declare_parameter('odom_frame_id', 'odom')
         self.declare_parameter('base_frame_id', 'ego_racecar/base_link')
         self.declare_parameter('odom_topic', '/ego_racecar/odom')
         self.declare_parameter('path_topic', '/planning/path')
@@ -77,6 +81,7 @@ class LinearMpcNode(Node):
         self.solve_when_disabled = bool(
             self.get_parameter('solve_when_disabled').value)
         self.global_frame_id = self.get_parameter('global_frame_id').value
+        self.odom_frame_id = self.get_parameter('odom_frame_id').value
         self.base_frame_id = self.get_parameter('base_frame_id').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.path_topic = self.get_parameter('path_topic').value
@@ -89,6 +94,7 @@ class LinearMpcNode(Node):
         self.horizon = int(self.get_parameter('horizon_steps').value)
         self.dt = float(self.get_parameter('dt').value)
         control_rate = float(self.get_parameter('control_rate').value)
+        self.control_period_ms = 1000.0 / max(control_rate, 1.0)
         self.target_speed = float(self.get_parameter('target_speed').value)
         self.min_reference_speed = float(
             self.get_parameter('min_reference_speed').value)
@@ -191,8 +197,9 @@ class LinearMpcNode(Node):
             1.0 / max(control_rate, 1.0), self.control_loop)
 
         self.get_logger().info(
-            'Linear MPC ready (enabled=%s, N=%d, dt=%.2fs, target=%.2fm/s)'
-            % (self.enabled, self.horizon, self.dt, self.target_speed))
+            '%s ready (enabled=%s, N=%d, dt=%.2fs, target=%.2fm/s)'
+            % (self.DISPLAY_NAME, self.enabled, self.horizon, self.dt,
+               self.target_speed))
         self.get_logger().info(
             'Disabled mode solves and visualizes predictions, but publishes stop')
 
@@ -355,15 +362,33 @@ class LinearMpcNode(Node):
         return (self.get_clock().now() - stamp).nanoseconds * 1e-9
 
     def lookup_vehicle_pose(self):
-        transform = self.tf_buffer.lookup_transform(
+        # AMCL's map->odom correction and high-rate odometry do not always
+        # share a recent timestamp while the car is stationary. Asking TF for
+        # map->base_link as one chain can therefore fail or return a delayed
+        # pose. Compose the newest localization correction with the newest
+        # odometry pose, which is also the controller's velocity source.
+        map_from_odom = self.tf_buffer.lookup_transform(
             self.global_frame_id,
-            self.base_frame_id,
+            self.odom_frame_id,
             Time(),
             timeout=Duration(seconds=0.03),
         )
-        translation = transform.transform.translation
-        yaw = self.quaternion_to_yaw(transform.transform.rotation)
-        return translation.x, translation.y, yaw
+        map_translation = map_from_odom.transform.translation
+        odom_pose = self.current_odom.pose.pose
+        map_yaw = self.quaternion_to_yaw(
+            map_from_odom.transform.rotation)
+        odom_yaw = self.quaternion_to_yaw(odom_pose.orientation)
+        cosine = math.cos(map_yaw)
+        sine = math.sin(map_yaw)
+        return (
+            map_translation.x
+            + cosine * odom_pose.position.x
+            - sine * odom_pose.position.y,
+            map_translation.y
+            + sine * odom_pose.position.x
+            + cosine * odom_pose.position.y,
+            self.angle_difference(map_yaw + odom_yaw, 0.0),
+        )
 
     def readiness_problem(self):
         if self.path_points is None:
@@ -592,7 +617,7 @@ class LinearMpcNode(Node):
             self.previous_steering = 0.0
             self.publish_stop()
             response.success = True
-            response.message = 'Linear MPC stopped'
+            response.message = self.DISPLAY_NAME + ' stopped'
             self.get_logger().info(response.message)
             return response
 
@@ -621,7 +646,7 @@ class LinearMpcNode(Node):
         self.enabled = True
         self.consecutive_solver_failures = 0
         response.success = True
-        response.message = 'Linear MPC enabled'
+        response.message = self.DISPLAY_NAME + ' enabled'
         self.get_logger().info(response.message)
         return response
 
@@ -670,9 +695,10 @@ class LinearMpcNode(Node):
             self.previous_steering = steering
             self.publish_drive(command_speed, steering)
 
-            if solve_ms > 1000.0 / 10.0:
+            if solve_ms > self.control_period_ms:
                 self.warn_throttled(
-                    'MPC solve time %.1f ms exceeds 10 Hz period' % solve_ms)
+                    'MPC solve time %.1f ms exceeds %.1f ms control period'
+                    % (solve_ms, self.control_period_ms))
         except (TransformException, RuntimeError, cp.error.SolverError) as error:
             self.last_solution_ok = False
             self.consecutive_solver_failures += 1
@@ -689,14 +715,17 @@ def main(args=None):
     node = LinearMpcNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        if rclpy.ok():
-            node.publish_stop()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            if rclpy.ok():
+                node.publish_stop()
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == '__main__':

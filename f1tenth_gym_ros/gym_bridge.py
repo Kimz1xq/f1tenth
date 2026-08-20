@@ -20,7 +20,11 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from concurrent.futures import ThreadPoolExecutor
+
 import rclpy
+from rclpy._rclpy_pybind11 import RCLError
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
 from sensor_msgs.msg import LaserScan
@@ -49,12 +53,14 @@ import numpy as np
 from transforms3d import euler
 
 from f1tenth_gym_ros.static_obstacles import (
+    ClosedPathLapTracker,
     OccupancyMap,
     StaticObstacle,
     generate_obstacles,
     inject_obstacles_into_scan,
-    lap_count_transition,
     load_path,
+    passage_candidate_is_feasible,
+    point_before_path_index,
     resolve_obstacle_seed,
     vehicle_hits_obstacle,
 )
@@ -91,6 +97,7 @@ class GymBridge(Node):
         self.declare_parameter('ground_truth_odom_topic', '/ground_truth/odom')
         self.declare_parameter('sim_reset_topic', '/sim_reset_pose')
         self.declare_parameter('collision_topic', '/ego_racecar/collision')
+        self.declare_parameter('stop_vehicle_on_collision', True)
         self.declare_parameter('topic_publish_rate', 40.0)
         self.declare_parameter('random_obstacles_enabled', False)
         self.declare_parameter('random_obstacle_count', 2)
@@ -113,6 +120,11 @@ class GymBridge(Node):
             '/simulation/obstacles_ground_truth')
         self.declare_parameter('vehicle_length', 0.58)
         self.declare_parameter('vehicle_width', 0.31)
+        self.declare_parameter('wheelbase', 0.33)
+        self.declare_parameter('max_steering_angle', 0.4189)
+        self.declare_parameter('obstacle_feasibility_before', 4.0)
+        self.declare_parameter('obstacle_feasibility_after', 4.0)
+        self.declare_parameter('obstacle_feasibility_wall_margin', 0.02)
         self.declare_parameter('friction_mu', 1.0489)
 
         # check num_agents
@@ -170,6 +182,9 @@ class GymBridge(Node):
         self.ego_requested_speed = 0.0
         self.ego_steer = 0.0
         self.ego_collision = False
+        self.ego_collision_latched = False
+        self.stop_vehicle_on_collision = bool(
+            self.get_parameter('stop_vehicle_on_collision').value)
         ego_scan_topic = self.get_parameter('ego_scan_topic').value
         ego_drive_topic = self.get_parameter('ego_drive_topic').value
         scan_fov = self.get_parameter('scan_fov').value
@@ -184,11 +199,15 @@ class GymBridge(Node):
         self.obstacles = []
         self.obstacle_sequence = 0
         self.obstacle_round = 0
+        self.obstacle_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='obstacle_layout')
+        self.next_obstacle_layout = None
         self.obstacle_seed = int(
             self.get_parameter('random_obstacle_seed').value)
         self.random_obstacles_active = False
         self.obstacle_path = None
         self.obstacle_path_yaws = None
+        self.obstacle_lap_tracker = None
         self.occupancy_map = None
         self.vehicle_length = float(self.get_parameter('vehicle_length').value)
         self.vehicle_width = float(self.get_parameter('vehicle_width').value)
@@ -219,16 +238,18 @@ class GymBridge(Node):
             self.obs, _ , self.done, _ = self.env.reset(np.array([[sx, sy, stheta]]))
             self.ego_scan = list(self.obs['scans'][0])
 
-        self.last_ego_lap_count = int(self.obs['lap_counts'][0])
-
-        # sim physical step timer
-        self.drive_timer = self.create_timer(0.01, self.drive_timer_callback)
-        # Publish simulated sensors at a realistic rate. The physics timer stays
-        # at 100 Hz, while 1080-beam LaserScan serialization is kept bounded.
+        # Run physics and sensor publication from one executor timer.  With two
+        # independent timers on rclpy's single-threaded executor, an overdue
+        # 100 Hz Gym step could repeatedly win scheduling and starve the 40 Hz
+        # odometry/scan timer. Controllers then saw stale odometry and pulsed
+        # between drive and safety-stop. Keep the requested rates separate,
+        # but schedule publication explicitly after a completed physics step.
+        self.physics_period = 0.01
         topic_publish_rate = float(
             self.get_parameter('topic_publish_rate').value)
-        self.timer = self.create_timer(
-            1.0 / max(topic_publish_rate, 1.0), self.timer_callback)
+        self.topic_publish_period_ns = int(
+            1e9 / max(topic_publish_rate, 1.0))
+        self.last_topic_publish_ns = None
 
         # transform broadcaster
         self.br = TransformBroadcaster(self)
@@ -309,8 +330,17 @@ class GymBridge(Node):
         else:
             self.publish_obstacle_markers()
 
+        # Create the timer after publishers and subscriptions are ready.  The
+        # callback advances Gym first, then publishes a coherent sensor sample.
+        self.drive_timer = self.create_timer(
+            self.physics_period, self.drive_timer_callback)
+
 
     def drive_callback(self, drive_msg):
+        if self.stop_vehicle_on_collision and self.ego_collision_latched:
+            self.ego_requested_speed = 0.0
+            self.ego_steer = 0.0
+            return
         self.ego_requested_speed = drive_msg.drive.speed
         self.ego_steer = drive_msg.drive.steering_angle
         self.ego_drive_published = True
@@ -333,6 +363,16 @@ class GymBridge(Node):
             self.obs, _ , self.done, _ = self.env.reset(np.array([[rx, ry, rtheta], opp_pose]))
         else:
             self.obs, _ , self.done, _ = self.env.reset(np.array([[rx, ry, rtheta]]))
+        # A collision can leave the simulator latched at zero speed.  Reset
+        # only the transient vehicle command/state together with the Gym pose;
+        # map, controller, and vehicle parameters remain unchanged.
+        self.ego_requested_speed = 0.0
+        self.ego_steer = 0.0
+        self.ego_collision = False
+        self.ego_collision_latched = False
+        self.ego_drive_published = False
+        if self.obstacle_lap_tracker is not None:
+            self.obstacle_lap_tracker.reset((rx, ry))
         self._update_sim_state()
         if self.get_parameter('randomize_obstacles_on_reset').value:
             self.randomize_obstacles()
@@ -368,6 +408,21 @@ class GymBridge(Node):
         elif self.ego_drive_published and self.has_opp and self.opp_drive_published:
             self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed], [self.opp_steer, self.opp_requested_speed]]))
         self._update_sim_state()
+
+        now_ns = self.get_clock().now().nanoseconds
+        if (self.last_topic_publish_ns is None
+                or now_ns - self.last_topic_publish_ns
+                >= self.topic_publish_period_ns):
+            if self.last_topic_publish_ns is None:
+                self.last_topic_publish_ns = now_ns
+            else:
+                elapsed_periods = max(
+                    1,
+                    (now_ns - self.last_topic_publish_ns)
+                    // self.topic_publish_period_ns)
+                self.last_topic_publish_ns += (
+                    elapsed_periods * self.topic_publish_period_ns)
+            self.timer_callback()
 
     def timer_callback(self):
         ts = self.get_clock().now().to_msg()
@@ -438,19 +493,32 @@ class GymBridge(Node):
                 self.vehicle_width,
                 obstacle)
             for obstacle in self.obstacles)
-        self.ego_collision = bool(
-            self.obs['collisions'][0] or obstacle_collision)
-        if obstacle_collision:
+        map_collision = bool(self.obs['collisions'][0])
+        collision_now = bool(map_collision or obstacle_collision)
+        if collision_now and not self.ego_collision:
+            self.get_logger().error(
+                'Collision detected: map=%s obstacle=%s '
+                'pose=(%.3f, %.3f, %.3f)'
+                % (
+                    map_collision,
+                    obstacle_collision,
+                    self.ego_pose[0],
+                    self.ego_pose[1],
+                    self.ego_pose[2],
+                ))
+        self.ego_collision = collision_now
+        if self.stop_vehicle_on_collision and collision_now:
+            self.ego_collision_latched = True
+        elif not self.stop_vehicle_on_collision:
+            self.ego_collision_latched = False
+        if self.stop_vehicle_on_collision and self.ego_collision_latched:
             self.ego_requested_speed = 0.0
+            self.ego_steer = 0.0
 
     def _randomize_obstacles_after_lap(self):
-        lap_counts = self.obs.get('lap_counts')
-        if lap_counts is None or len(lap_counts) == 0:
+        if self.obstacle_lap_tracker is None:
             return
-
-        current_lap, completed_laps = lap_count_transition(
-            self.last_ego_lap_count, lap_counts[0])
-        self.last_ego_lap_count = current_lap
+        completed_laps = self.obstacle_lap_tracker.update(self.ego_pose[:2])
         if completed_laps == 0:
             return
         if not self.random_obstacles_active:
@@ -459,36 +527,77 @@ class GymBridge(Node):
             return
 
         try:
-            seed, summary = self.randomize_obstacles()
+            # Layouts are normally prepared during the previous lap. In the
+            # unlikely event that generation is still running, wait here so
+            # every completed lap always receives a new random layout.
+            if self.next_obstacle_layout is None:
+                self.schedule_next_obstacle_layout()
+            future = self.next_obstacle_layout
+            self.next_obstacle_layout = None
+            layout = future.result()
+            seed, summary = self.apply_obstacle_layout(layout)
+            self.schedule_next_obstacle_layout()
             self.get_logger().info(
                 'Lap %d complete: obstacles moved with seed=%d: %s'
-                % (current_lap, seed, summary))
+                % (self.obstacle_lap_tracker.lap_count, seed, summary))
         except Exception as error:  # pylint: disable=broad-except
             self.get_logger().error(
                 'Lap %d obstacle randomization failed; keeping previous '
-                'obstacles: %s' % (current_lap, error))
+                'obstacles: %s'
+                % (self.obstacle_lap_tracker.lap_count, error))
 
     def load_obstacle_placement_data(self):
         if self.obstacle_path is None:
             path = self.get_parameter('obstacle_path_csv').value
             self.obstacle_path, self.obstacle_path_yaws = load_path(path)
+            self.obstacle_lap_tracker = ClosedPathLapTracker(
+                self.obstacle_path, self.ego_pose[:2])
         if self.occupancy_map is None:
             yaml_path = self.get_parameter('map_path').value + '.yaml'
             self.occupancy_map = OccupancyMap(yaml_path)
 
     def obstacle_candidate_is_valid(
-            self, obstacle, passage_x, passage_y, passage_radius):
+            self, obstacle, passage_x, passage_y, passage_radius,
+            path_index, obstacle_side):
+        visibility_distance = float(self.get_parameter(
+            'obstacle_feasibility_before').value)
+        approach_point = point_before_path_index(
+            self.obstacle_path, path_index, visibility_distance)
         return (
             self.occupancy_map.rectangle_is_free(obstacle)
+            # A randomized regression obstacle must be observable early enough
+            # for the configured lateral transition.  Otherwise a wall-hidden
+            # object tests only emergency braking, not obstacle avoidance.
+            and self.occupancy_map.segment_is_free(
+                approach_point, (obstacle.x, obstacle.y))
             and self.occupancy_map.circle_is_free(
-                passage_x, passage_y, passage_radius))
+                passage_x, passage_y, passage_radius)
+            and passage_candidate_is_feasible(
+                self.occupancy_map,
+                self.obstacle_path,
+                self.obstacle_path_yaws,
+                path_index,
+                obstacle,
+                float(self.get_parameter(
+                    'obstacle_passage_offset').value),
+                float(self.get_parameter('vehicle_length').value),
+                float(self.get_parameter('vehicle_width').value),
+                float(self.get_parameter('wheelbase').value),
+                float(self.get_parameter('max_steering_angle').value),
+                before_distance=float(self.get_parameter(
+                    'obstacle_feasibility_before').value),
+                after_distance=float(self.get_parameter(
+                    'obstacle_feasibility_after').value),
+                wall_margin=float(self.get_parameter(
+                    'obstacle_feasibility_wall_margin').value),
+                obstacle_side=obstacle_side,
+            ))
 
-    def randomize_obstacles(self):
+    def generate_obstacle_layout(self, round_index):
         self.load_obstacle_placement_data()
         seed = resolve_obstacle_seed(
-            self.obstacle_seed, self.obstacle_round)
-        self.obstacle_round += 1
-        self.obstacles = generate_obstacles(
+            self.obstacle_seed, round_index)
+        obstacles = generate_obstacles(
             self.obstacle_path,
             self.obstacle_path_yaws,
             count=int(self.get_parameter('random_obstacle_count').value),
@@ -499,8 +608,13 @@ class GymBridge(Node):
             lateral_offset=float(
                 self.get_parameter('obstacle_lateral_offset').value),
             start_xy=(self.ego_pose[0], self.ego_pose[1]),
-            start_clearance=float(
-                self.get_parameter('obstacle_start_clearance').value),
+            # A new run/lap starts on the reference path. Do not place an
+            # obstacle closer than the distance required to establish the
+            # configured smooth lateral transition from that initial state.
+            start_clearance=max(
+                float(self.get_parameter('obstacle_start_clearance').value),
+                float(self.get_parameter(
+                    'obstacle_feasibility_before').value)),
             min_spacing=float(
                 self.get_parameter('obstacle_min_spacing').value),
             passage_offset=float(
@@ -508,16 +622,45 @@ class GymBridge(Node):
             passage_radius=float(
                 self.get_parameter('obstacle_passage_radius').value),
             validator=self.obstacle_candidate_is_valid)
-        self.obstacle_sequence = len(self.obstacles)
-        self.random_obstacles_active = True
-        self.publish_obstacle_markers()
         summary = ', '.join(
             '#%d=(%.2f, %.2f)' % (
                 obstacle.obstacle_id, obstacle.x, obstacle.y)
-            for obstacle in self.obstacles)
+            for obstacle in obstacles)
+        return seed, obstacles, summary
+
+    def apply_obstacle_layout(self, layout):
+        seed, obstacles, summary = layout
+        self.obstacles = obstacles
+        self.obstacle_sequence = len(self.obstacles)
+        self.random_obstacles_active = True
+        self.publish_obstacle_markers()
         self.get_logger().info(
             'Random obstacles seed=%d: %s' % (seed, summary))
         return seed, summary
+
+    def schedule_next_obstacle_layout(self):
+        if self.next_obstacle_layout is not None:
+            return
+        round_index = self.obstacle_round
+        self.obstacle_round += 1
+        self.next_obstacle_layout = self.obstacle_executor.submit(
+            self.generate_obstacle_layout, round_index)
+
+    def randomize_obstacles(self):
+        self.load_obstacle_placement_data()
+        if self.next_obstacle_layout is not None:
+            # Manual randomization is an explicit request and may wait for the
+            # already-running precomputation. Lap transitions never wait.
+            future = self.next_obstacle_layout
+            self.next_obstacle_layout = None
+            layout = future.result()
+        else:
+            round_index = self.obstacle_round
+            self.obstacle_round += 1
+            layout = self.generate_obstacle_layout(round_index)
+        result = self.apply_obstacle_layout(layout)
+        self.schedule_next_obstacle_layout()
+        return result
 
     def randomize_obstacles_callback(self, request, response):
         del request
@@ -540,6 +683,10 @@ class GymBridge(Node):
         response.success = True
         response.message = 'Static obstacles cleared'
         return response
+
+    def destroy_node(self):
+        self.obstacle_executor.shutdown(wait=False, cancel_futures=True)
+        return super().destroy_node()
 
     def clicked_point_callback(self, point_msg):
         if point_msg.header.frame_id not in ('', 'map'):
@@ -727,10 +874,30 @@ class GymBridge(Node):
             opp_scan_ts.child_frame_id = self.opp_namespace + '/laser'
             self.br.sendTransform(opp_scan_ts)
 
+
 def main(args=None):
     rclpy.init(args=args)
     gym_bridge = GymBridge()
-    rclpy.spin(gym_bridge)
+    try:
+        rclpy.spin(gym_bridge)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    except RCLError:
+        # SIGINT may invalidate the context while a timer callback is
+        # publishing its final TF/message.  That is normal shutdown, but an
+        # RCLError while the context is still valid is a real runtime error.
+        if rclpy.ok():
+            raise
+    finally:
+        try:
+            gym_bridge.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        except (KeyboardInterrupt, RCLError):
+            # A terminal and ros2 launch can deliver SIGINT almost together.
+            # Cleanup is already in progress, so suppress a false traceback.
+            pass
+
 
 if __name__ == '__main__':
     main()

@@ -89,11 +89,11 @@ Visualization Manager:
       Size (m): 0.10000000149011612
       Style: Flat Squares
       Topic:
-        Depth: 5
+        Depth: 1
         Durability Policy: Volatile
-        Filter size: 10
+        Filter size: 1
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /scan
       Use Fixed Frame: true
       Use rainbow: true
@@ -175,13 +175,13 @@ Visualization Manager:
           Frame: Local
           Offset: 1
           Scale: 1
-          Value: true
+          Value: false
         Position:
           Alpha: 0.30000001192092896
           Color: 204; 51; 204
           Scale: 1
-          Value: true
-        Value: true
+          Value: false
+        Value: false
       Enabled: true
       Head Length: 0.30000001192092896
       Head Radius: 0.10000000149011612

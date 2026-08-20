@@ -29,6 +29,7 @@
   <depend>python-transforms3d-pip</depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-pil</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
 
   <test_depend>ament_copyright</test_depend>

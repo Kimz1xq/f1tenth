@@ -2,6 +2,7 @@ import math
 
 import rclpy
 from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.time import Time
 
@@ -410,12 +411,17 @@ def main(args=None):
     node = PurePursuitNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.publish_stop()
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if rclpy.ok():
+                node.publish_stop()
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == '__main__':

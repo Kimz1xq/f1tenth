@@ -10,7 +10,10 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def _parse_dynamic_speed(profile_name):
+SOFTWARE_SPEED_CEILING = 20.0
+
+
+def _parse_dynamic_speed(profile_name, maximum_speed=SOFTWARE_SPEED_CEILING):
     """Return m/s encoded by speed_<value>, or None for a named profile."""
     if not profile_name.startswith('speed_'):
         return None
@@ -27,9 +30,12 @@ def _parse_dynamic_speed(profile_name):
             'use speed_0.85, speed_1.2, or speed_2.')
 
     speed = float(numeric)
-    if not math.isfinite(speed) or speed <= 0.0 or speed > 5.5:
+    if (not math.isfinite(speed)
+            or speed <= 0.0
+            or speed > float(maximum_speed)):
         raise RuntimeError(
-            f'Controller speed must be greater than 0 and at most 5.5 m/s; '
+            'Controller speed must be greater than 0 and at most '
+            f'{float(maximum_speed):g} m/s; '
             f'got {speed!r}.')
     return speed
 
@@ -39,26 +45,172 @@ def _as_bool(value):
 
 
 def _launch_setup(context):
+    package_share = get_package_share_directory('control')
     controller = LaunchConfiguration('controller').perform(context)
+    drive_mode = LaunchConfiguration('drive_mode').perform(context)
+    if drive_mode not in ('sim', 'real'):
+        raise RuntimeError("drive_mode must be 'sim' or 'real'")
+    maximum_speed = float(
+        LaunchConfiguration('maximum_speed').perform(context))
+    if (not math.isfinite(maximum_speed)
+            or maximum_speed <= 0.0
+            or maximum_speed > SOFTWARE_SPEED_CEILING):
+        raise RuntimeError(
+            'maximum_speed must be greater than 0 and at most '
+            f'{SOFTWARE_SPEED_CEILING:g} m/s; got {maximum_speed!r}.')
     if controller == 'none':
         return [LogInfo(msg='Controller disabled (controller:=none)')]
 
     if controller == 'pure_pursuit':
-        return [Node(
-            package='control',
-            executable='pure_pursuit_node',
-            name='pure_pursuit_node',
-            output='screen',
-            parameters=[
-                LaunchConfiguration('params_file').perform(context),
-                {'drive_mode': LaunchConfiguration('drive_mode').perform(context)},
-            ],
-        )]
-
-    if controller in ('unicorn_l1', 'unicorn_l1_dynamic'):
-        use_dynamic_speed_limit = controller == 'unicorn_l1_dynamic'
         profile_name = LaunchConfiguration('mpc_profile').perform(context)
-        requested_speed = _parse_dynamic_speed(profile_name)
+        requested_speed = _parse_dynamic_speed(profile_name, maximum_speed)
+        if requested_speed is None:
+            raise RuntimeError(
+                'Pure Pursuit requires mpc_profile:=speed_<m/s> '
+                '(for example speed_1.0).')
+        return [
+            LogInfo(msg=(
+                f'Controller=pure_pursuit speed={requested_speed:.2f}m/s')),
+            Node(
+                package='control',
+                executable='pure_pursuit_node',
+                name='pure_pursuit_node',
+                output='screen',
+                parameters=[
+                    LaunchConfiguration('params_file').perform(context),
+                    {
+                        'drive_mode': drive_mode,
+                        'target_speed': requested_speed,
+                        'max_speed': requested_speed,
+                        'min_speed': min(0.25, requested_speed),
+                    },
+                ],
+            ),
+        ]
+
+    if controller == 'forza_map':
+        profile_name = LaunchConfiguration('mpc_profile').perform(context)
+        requested_speed = _parse_dynamic_speed(profile_name, maximum_speed)
+        if requested_speed is None:
+            raise RuntimeError(
+                'ForzaETH MAP requires mpc_profile:=speed_<m/s> '
+                '(for example speed_3.0).')
+        table_argument = LaunchConfiguration(
+            'steering_lookup_table').perform(context)
+        if table_argument == 'auto':
+            table_path = os.path.join(
+                package_share, 'config',
+                'forzaeth_linear_bicycle_lookup_table.csv')
+        else:
+            table_path = table_argument
+        if not os.path.isfile(table_path):
+            raise RuntimeError(
+                'ForzaETH MAP steering lookup table not found: '
+                + table_path)
+
+        min_reference_speed = min(
+            requested_speed,
+            max(0.20, min(0.45, requested_speed * 0.40)),
+        )
+        avoidance_value = LaunchConfiguration(
+            'avoidance_speed_limit').perform(context)
+        avoidance_speed_limit = (
+            requested_speed if avoidance_value == 'auto'
+            else float(avoidance_value))
+        # The upstream ForzaETH race stack uses different L1 defaults for its
+        # physical NUC configuration and its simulator.  Keep that distinction
+        # here without changing the vehicle's VESC/servo calibration.
+        if drive_mode == 'real':
+            map_parameters = {
+                't_clip_min': 0.9,
+                't_clip_max': 5.0,
+                'm_l1': 0.55,
+                'q_l1': -0.03,
+                'speed_lookahead': 0.25,
+                'lat_err_coeff': 1.0,
+                'acc_scaler_for_steer': 1.2,
+                'dec_scaler_for_steer': 0.9,
+                'start_scale_speed': 7.0,
+                'end_scale_speed': 8.0,
+                'downscale_factor': 0.20,
+                'speed_lookahead_for_steer': 0.0,
+            }
+        else:
+            map_parameters = {
+                't_clip_min': 1.0,
+                't_clip_max': 5.0,
+                'm_l1': 0.30,
+                'q_l1': 0.15,
+                'speed_lookahead': 0.0,
+                'lat_err_coeff': 1.0,
+                'acc_scaler_for_steer': 1.0,
+                'dec_scaler_for_steer': 1.0,
+                'start_scale_speed': 7.0,
+                'end_scale_speed': 8.0,
+                'downscale_factor': 0.20,
+                'speed_lookahead_for_steer': 0.0,
+            }
+        return [
+            LogInfo(msg=(
+                'Controller=forza_map (ForzaETH MAP) '
+                f'speed={requested_speed:.2f}m/s model={table_path}')),
+            Node(
+                package='control',
+                executable='forza_map_node',
+                name='forza_map_node',
+                output='screen',
+                parameters=[{
+                    'enabled': _as_bool(
+                        LaunchConfiguration('enabled').perform(context)),
+                    'global_frame_id': LaunchConfiguration(
+                        'global_frame_id').perform(context),
+                    'odom_frame_id': LaunchConfiguration(
+                        'odom_frame_id').perform(context),
+                    'base_frame_id': LaunchConfiguration(
+                        'base_frame_id').perform(context),
+                    'odom_topic': LaunchConfiguration(
+                        'odom_topic').perform(context),
+                    'drive_topic': LaunchConfiguration(
+                        'drive_topic').perform(context),
+                    'collision_topic': LaunchConfiguration(
+                        'collision_topic').perform(context),
+                    'emergency_stop_topic': LaunchConfiguration(
+                        'emergency_stop_topic').perform(context),
+                    'target_speed': requested_speed,
+                    'max_speed': requested_speed,
+                    'min_reference_speed': min_reference_speed,
+                    'min_command_speed': float(LaunchConfiguration(
+                        'min_command_speed').perform(context)),
+                    'max_lateral_acceleration': float(LaunchConfiguration(
+                        'max_lateral_acceleration').perform(context)),
+                    'max_longitudinal_acceleration': float(
+                        LaunchConfiguration(
+                            'max_longitudinal_acceleration').perform(context)),
+                    'max_longitudinal_deceleration': float(
+                        LaunchConfiguration(
+                            'max_longitudinal_deceleration').perform(context)),
+                    'avoidance_speed_limit': avoidance_speed_limit,
+                    'use_dynamic_speed_limit': True,
+                    'steering_lookup_table': table_path,
+                    # A Gym collision must not latch the controller off during
+                    # repeated simulation testing. Physical-car mode always
+                    # retains the collision stop.
+                    'stop_on_collision': drive_mode == 'real',
+                    'stop_on_emergency_stop': drive_mode == 'real',
+                }, map_parameters],
+            ),
+        ]
+
+    if controller == 'unicorn_l1':
+        # UNICORN builds a spatial speed profile from every received path.  The
+        # local planner still owns AEB, but must not impose one scalar speed on
+        # an entire avoidance manoeuvre.
+        # The local planner publishes a_y = v^2*kappa based limits only while
+        # an avoidance path is active. This preserves straight-line speed and
+        # prevents a high top-speed request from overrunning a tight detour.
+        use_dynamic_speed_limit = True
+        profile_name = LaunchConfiguration('mpc_profile').perform(context)
+        requested_speed = _parse_dynamic_speed(profile_name, maximum_speed)
         if requested_speed is None:
             raise RuntimeError(
                 'UNICORN L1 requires mpc_profile:=speed_<m/s> '
@@ -80,6 +232,8 @@ def _launch_setup(context):
                 LaunchConfiguration('enabled').perform(context)),
             'global_frame_id': LaunchConfiguration(
                 'global_frame_id').perform(context),
+            'odom_frame_id': LaunchConfiguration(
+                'odom_frame_id').perform(context),
             'base_frame_id': LaunchConfiguration(
                 'base_frame_id').perform(context),
             'odom_topic': LaunchConfiguration('odom_topic').perform(context),
@@ -115,10 +269,10 @@ def _launch_setup(context):
             ),
         ]
 
-    if controller != 'mpc':
+    if controller not in ('mpc', 'mpcc'):
         raise RuntimeError(
             f'Unknown controller {controller!r}; use none, pure_pursuit, '
-            'unicorn_l1, unicorn_l1_dynamic, or mpc.')
+            'unicorn_l1, forza_map, mpc, or mpcc.')
 
     config_path = LaunchConfiguration('mpc_params_file').perform(context)
     profile_name = LaunchConfiguration('mpc_profile').perform(context)
@@ -126,10 +280,12 @@ def _launch_setup(context):
         config = yaml.safe_load(stream)
 
     profiles = config.get('profiles', {})
-    requested_speed = _parse_dynamic_speed(profile_name)
+    requested_speed = _parse_dynamic_speed(profile_name, maximum_speed)
     if requested_speed is not None:
         parameters = dict(config.get('common', {}))
         parameters.update(config.get('speed_template', {}))
+        if controller == 'mpcc':
+            parameters.update(config.get('mpcc_template', {}))
         parameters['target_speed'] = requested_speed
         parameters['max_speed'] = requested_speed
         parameters['min_reference_speed'] = min(
@@ -137,12 +293,14 @@ def _launch_setup(context):
             max(0.20, min(0.45, requested_speed * 0.40)),
         )
         selection_log = (
-            f'Controller=mpc dynamic_speed={requested_speed:.2f}m/s '
+            f'Controller={controller} dynamic_speed={requested_speed:.2f}m/s '
             f'corner_min={parameters["min_reference_speed"]:.2f}m/s')
     elif profile_name in profiles:
         parameters = dict(config.get('common', {}))
         parameters.update(profiles[profile_name])
-        selection_log = f'Controller=mpc profile={profile_name}'
+        if controller == 'mpcc':
+            parameters.update(config.get('mpcc_template', {}))
+        selection_log = f'Controller={controller} profile={profile_name}'
     else:
         available = ', '.join(sorted(profiles))
         raise RuntimeError(
@@ -153,6 +311,8 @@ def _launch_setup(context):
         'enabled': _as_bool(LaunchConfiguration('enabled').perform(context)),
         'global_frame_id': LaunchConfiguration(
             'global_frame_id').perform(context),
+        'odom_frame_id': LaunchConfiguration(
+            'odom_frame_id').perform(context),
         'base_frame_id': LaunchConfiguration(
             'base_frame_id').perform(context),
         'odom_topic': LaunchConfiguration('odom_topic').perform(context),
@@ -169,8 +329,12 @@ def _launch_setup(context):
         LogInfo(msg=selection_log),
         Node(
             package='control',
-            executable='linear_mpc_node',
-            name='linear_mpc_node',
+            executable=(
+                'nonlinear_mpcc_node'
+                if controller == 'mpcc' else 'linear_mpc_node'),
+            name=(
+                'nonlinear_mpcc_node'
+                if controller == 'mpcc' else 'linear_mpc_node'),
             output='screen',
             parameters=[parameters],
         ),
@@ -186,10 +350,16 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('drive_mode', default_value='sim'),
         DeclareLaunchArgument(
+            'maximum_speed',
+            default_value=str(SOFTWARE_SPEED_CEILING),
+            description=(
+                'Software command ceiling in m/s. The selected speed remains '
+                'a separate target and may be reduced by dynamics or safety.')),
+        DeclareLaunchArgument(
             'controller',
             default_value='pure_pursuit',
             description=(
-                'none, pure_pursuit, unicorn_l1, unicorn_l1_dynamic, or mpc'),
+                'none, pure_pursuit, unicorn_l1, forza_map, mpc, or mpcc'),
         ),
         DeclareLaunchArgument(
             'mpc_profile',
@@ -201,8 +371,16 @@ def generate_launch_description():
             default_value=os.path.join(
                 package_share, 'config', 'mpc_params.yaml'),
         ),
+        DeclareLaunchArgument(
+            'steering_lookup_table',
+            default_value='auto',
+            description=(
+                'ForzaETH MAP steering CSV; auto selects the official SIM '
+                'model and is intentionally rejected in real mode'),
+        ),
         DeclareLaunchArgument('enabled', default_value='false'),
         DeclareLaunchArgument('global_frame_id', default_value='map'),
+        DeclareLaunchArgument('odom_frame_id', default_value='odom'),
         DeclareLaunchArgument(
             'base_frame_id', default_value='ego_racecar/base_link'),
         DeclareLaunchArgument(

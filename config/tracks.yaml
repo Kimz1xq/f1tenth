@@ -16,5 +16,16 @@ tracks:
     map_ext: .pgm
     centerline: /sim_ws/src/planning/waypoints/track03_centerline.csv
     raceline: /sim_ws/src/planning/waypoints/track03_raceline.csv
-    start: [0.2985, 0.5926, -0.6205]
+    # Keep the simulator aligned with regenerated racelines automatically.
+    start: raceline
+    friction_mu: 1.0489
+
+  high_speed_test:
+    # Purpose-built 180 x 110 m oval for measuring the high-speed envelope.
+    # track03 remains the small-course and obstacle-avoidance benchmark.
+    map_path: /sim_ws/src/f1tenth_gym_ros/maps/high_speed_test
+    map_ext: .pgm
+    centerline: /sim_ws/src/planning/waypoints/high_speed_test_centerline.csv
+    raceline: /sim_ws/src/planning/waypoints/high_speed_test_raceline.csv
+    start: raceline
     friction_mu: 1.0489

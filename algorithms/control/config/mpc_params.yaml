@@ -38,6 +38,13 @@ speed_template:
   rd_acceleration: 0.50
   rd_steering: 4.00
 
+# Nonlinear MPCC solves an NLP rather than the linear controller's QP.  Keep
+# its computational budget in the same central configuration file.  At
+# dt=0.10 this still predicts 1.2 s ahead without carrying an unnecessary
+# 20-step IPOPT problem on every control cycle.
+mpcc_template:
+  horizon_steps: 12
+
 profiles:
   baseline:
     horizon_steps: 12
