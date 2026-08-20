@@ -31,6 +31,7 @@ from planning.local_planner_core import (
     adaptive_candidate_offsets,
     adaptive_map_endpoint_threshold,
     cluster_ordered_points,
+    minimum_clustered_path_clearance,
     nearest_clustered_corridor_distance,
     minimum_surface_footprint_clearance,
     ordered_candidate_offsets,
@@ -255,6 +256,9 @@ class LocalObstaclePlannerNode(Node):
         self.pending_scans = deque(maxlen=20)
         self.ttc_stop = False
         self.nearest_corridor_distance = float('inf')
+        self.latest_scan_clusters = []
+        self.latest_scan_generation = 0
+        self.last_aeb_scan_generation = -1
         self.aeb_detection_count = 0
         self.tracked_obstacles = []
         self.next_obstacle_id = 0
@@ -567,23 +571,16 @@ class LocalObstaclePlannerNode(Node):
         self.nearest_corridor_distance = (
             nearest_clustered_corridor_distance(
                 base_clusters, self.aeb_half_width))
-        stop_distance = (
-            self.aeb_min_distance
-            + self.speed * self.aeb_reaction_time
-            + self.speed ** 2 / (2.0 * max(self.aeb_deceleration, 0.1)))
-        raw_ttc_stop = bool(
-            math.isfinite(self.nearest_corridor_distance)
-            and self.nearest_corridor_distance < stop_distance)
-        self.aeb_detection_count = (
-            self.aeb_detection_count + 1 if raw_ttc_stop else 0)
-        self.ttc_stop = (
-            self.aeb_detection_count >= self.aeb_confirmation_frames)
 
         clusters = cluster_ordered_points(
             filtered,
             max_gap=self.cluster_gap,
             min_points=self.cluster_min_points,
             max_diameter=self.cluster_max_diameter)
+        # The newest map-frame LaserScan surfaces feed the path-aligned AEB.
+        # This is the same measured input in simulation and on the car.
+        self.latest_scan_clusters = [cluster.copy() for cluster in clusters]
+        self.latest_scan_generation += 1
         observations = []
         for cluster in clusters:
             center = np.mean(cluster, axis=0)
@@ -1120,15 +1117,41 @@ class LocalObstaclePlannerNode(Node):
             feasible and (
                 retained_avoidance
                 or (active and abs(selected_offset) > 1e-3)))
+        # Follow the selected path for the emergency check.  A fixed straight
+        # corridor fights a valid avoidance manoeuvre: the bypassed object is
+        # still physically in front of the car even though the selected path
+        # has already curved around it.  The full current-speed stopping
+        # distance remains fail-safe when that selected path still intersects
+        # a dense LaserScan cluster.
         critical_distance = (
             self.aeb_min_distance
-            + self.vehicle_clearance
-            + self.obstacle_default_radius
-            + self.obstacle_margin
-            + self.speed * self.aeb_critical_reaction_time)
+            + self.speed * self.aeb_reaction_time
+            + self.speed ** 2 / (2.0 * max(self.aeb_deceleration, 0.1)))
+        commanded_path = (
+            selected if feasible or self.last_safe_path is None
+            else self.last_safe_path)
+        emergency_path = sample_path_window(
+            commanded_path,
+            self.path_geometry,
+            vehicle_s,
+            max(critical_distance, self.vehicle_length),
+            self.sample_spacing)
+        emergency_clearance = minimum_clustered_path_clearance(
+            emergency_path,
+            self.latest_scan_clusters,
+            self.vehicle_length,
+            self.vehicle_width,
+            self.obstacle_margin)
+        raw_path_stop = bool(emergency_clearance < 0.0)
+        # A planning timer may run more often than LaserScan processing. Count
+        # each sensor observation once so confirmation_frames represents real
+        # independent measurements instead of repeated use of one scan.
+        if self.latest_scan_generation != self.last_aeb_scan_generation:
+            self.aeb_detection_count = (
+                self.aeb_detection_count + 1 if raw_path_stop else 0)
+            self.last_aeb_scan_generation = self.latest_scan_generation
         critical_stop = bool(
-            self.ttc_stop
-            and self.nearest_corridor_distance < critical_distance)
+            self.aeb_detection_count >= self.aeb_confirmation_frames)
         stop.data = bool(critical_stop or not feasible)
         self.stop_pub.publish(stop)
         self.avoidance_pub.publish(avoidance)
@@ -1146,7 +1169,8 @@ class LocalObstaclePlannerNode(Node):
         self.publish_speed_limit(speed_limit)
         self.publish_markers(selected, active)
         if critical_stop:
-            self.set_status('AEB_STOP')
+            self.set_status(
+                'AEB_STOP path_clearance=%+.2fm' % emergency_clearance)
         elif not feasible:
             details = ','.join(
                 '%+.2f:%s=%+.2f:k=%.2f:L=%.2f' % (

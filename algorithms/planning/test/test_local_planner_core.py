@@ -11,6 +11,7 @@ from planning.local_planner_core import (
     minimum_quintic_transition_length,
     minimum_surface_clearance,
     minimum_surface_footprint_clearance,
+    minimum_clustered_path_clearance,
     nearest_clustered_corridor_distance,
     ordered_candidate_offsets,
     path_curvature_percentile,
@@ -315,6 +316,26 @@ def test_surface_footprint_clearance_is_signed_outside_buffered_box():
         path, surface, vehicle_length=0.58, vehicle_width=0.31,
         safety_margin=0.05)
     assert np.isclose(clearance, 0.02)
+
+
+def test_path_aligned_aeb_clears_bypassed_obstacle():
+    """A bypassed object must not stop a path whose footprint clears it."""
+    obstacle = [np.asarray([
+        [0.90, -0.04], [0.90, 0.00], [0.90, 0.04],
+    ])]
+    collision_path = np.asarray([
+        [0.0, 0.0], [0.5, 0.0], [1.0, 0.0], [1.5, 0.0],
+    ])
+    bypass_path = np.asarray([
+        [0.0, 0.0], [0.3, 0.25], [0.6, 0.50],
+        [1.0, 0.50], [1.5, 0.50],
+    ])
+    collision = minimum_clustered_path_clearance(
+        collision_path, obstacle, 0.58, 0.31, 0.01)
+    bypass = minimum_clustered_path_clearance(
+        bypass_path, obstacle, 0.58, 0.31, 0.01)
+    assert collision < 0.0
+    assert bypass > 0.0
 
 
 def test_obstacle_tracks_expire_and_match_once_per_scan():

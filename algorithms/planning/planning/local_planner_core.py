@@ -678,3 +678,30 @@ def minimum_surface_footprint_clearance(
         np.maximum(q_lateral, 0.0))
     inside = np.minimum(np.maximum(q_longitudinal, q_lateral), 0.0)
     return float(np.min(outside + inside))
+
+
+def minimum_clustered_path_clearance(
+        path_points, clusters, vehicle_length, vehicle_width,
+        safety_margin=0.0):
+    """
+    Return swept-footprint clearance to the nearest scan cluster.
+
+    This evaluates the path the controller will actually follow.  A static
+    obstacle that remains in front of the bumper therefore does not trigger a
+    stop after a collision-free avoidance path has moved the vehicle footprint
+    around it.
+    """
+    minimum = float('inf')
+    for cluster in clusters:
+        points = np.asarray(cluster, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 2 or len(points) == 0:
+            continue
+        minimum = min(
+            minimum,
+            minimum_surface_footprint_clearance(
+                path_points,
+                points,
+                vehicle_length,
+                vehicle_width,
+                safety_margin))
+    return minimum
