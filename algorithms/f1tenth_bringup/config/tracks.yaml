@@ -1,0 +1,21 @@
+default_track: track03
+
+tracks:
+  track02:
+    map_name: track02
+    map_ext: .png
+    raceline: track02_raceline.csv
+    start: raceline
+
+  track03:
+    map_name: track03
+    map_ext: .pgm
+    raceline: track03_raceline.csv
+    start: raceline
+
+  high_speed_test:
+    map_name: high_speed_test
+    map_ext: .pgm
+    raceline: high_speed_test_raceline.csv
+    start: raceline
+

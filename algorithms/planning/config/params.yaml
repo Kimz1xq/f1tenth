@@ -30,6 +30,9 @@ local_obstacle_planner_node:
     detection_range: 6.0
     # Ignore small map/scan registration residuals near mapped walls.
     map_endpoint_clearance: 0.36
+    map_registration_percentile: 60.0
+    map_registration_margin: 0.08
+    map_registration_max_extra: 0.25
     cluster_gap: 0.16
     cluster_min_points: 10
     cluster_max_diameter: 0.55
@@ -74,7 +77,7 @@ local_obstacle_planner_node:
     vehicle_length: 0.58
     vehicle_width: 0.31
     # Ackermann geometric feasibility: kappa <= tan(delta_max) / wheelbase.
-    wheelbase: 0.33
+    wheelbase: 0.324
     max_steering_angle: 0.4189
     obstacle_safety_margin: 0.01
 

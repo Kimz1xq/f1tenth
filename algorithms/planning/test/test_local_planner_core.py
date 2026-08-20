@@ -5,6 +5,7 @@ import numpy as np
 from planning.local_planner_core import (
     ClosedPathGeometry,
     adaptive_candidate_offsets,
+    adaptive_map_endpoint_threshold,
     cluster_ordered_points,
     closed_spline_curvature_percentile,
     minimum_quintic_transition_length,
@@ -20,6 +21,20 @@ from planning.local_planner_core import (
     swept_rectangle_samples,
     update_tracked_obstacles,
 )
+
+
+def test_map_endpoint_threshold_tracks_bounded_registration_residual():
+    """Most wall returns may relax the filter, but never without a bound."""
+    clearances = np.asarray([0.18] * 80 + [0.65] * 20)
+    threshold = adaptive_map_endpoint_threshold(
+        clearances, 0.30, 60.0, 0.08, 0.25)
+    assert np.isclose(threshold, 0.30)
+
+    shifted = clearances + 0.20
+    shifted_threshold = adaptive_map_endpoint_threshold(
+        shifted, 0.30, 60.0, 0.08, 0.25)
+    assert np.isclose(shifted_threshold, 0.46)
+    assert shifted_threshold <= 0.55
 
 
 def test_swept_rectangle_samples_include_buffered_corners():

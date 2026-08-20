@@ -35,7 +35,7 @@ bridge:
     opp_drive_topic: 'opp_drive'
 
     # transform related
-    scan_distance_to_base_link: 0.275
+    scan_distance_to_base_link: 0.270
     odom_frame_id: 'odom'
     ground_truth_odom_topic: '/ground_truth/odom'
     sim_reset_topic: '/sim_reset_pose'
@@ -73,9 +73,9 @@ bridge:
     random_obstacle_seed: -1
     randomize_obstacles_on_reset: false
     randomize_obstacles_on_lap: true
-    # Simulation crash testing: report contact but keep accepting /drive.
-    # Physical-car safety is configured independently in onboard bringup.
-    stop_vehicle_on_collision: false
+    # Match the physical failure mode: contact latches zero command until the
+    # pose is reset or a new process starts.
+    stop_vehicle_on_collision: true
     obstacle_path_csv: '/sim_ws/src/planning/waypoints/track03_raceline.csv'
     obstacle_length: 0.20
     obstacle_width: 0.12
@@ -90,8 +90,11 @@ bridge:
     obstacle_marker_topic: '/simulation/obstacles_ground_truth'
     vehicle_length: 0.58
     vehicle_width: 0.31
-    wheelbase: 0.33
+    wheelbase: 0.324
     max_steering_angle: 0.4189
+    max_steering_rate: 3.2
+    steering_command_delay: 0.12
+    max_acceleration: 2.5
     # Random layouts must admit a smooth, footprint-safe Ackermann passage.
     # These are geometry checks for the simulator fixture, not planner inputs.
     obstacle_feasibility_before: 4.0

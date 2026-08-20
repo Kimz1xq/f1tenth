@@ -45,10 +45,9 @@ def _launch_setup(context, config, config_dict):
     amcl_odom_noise_argument = LaunchConfiguration(
         'amcl_odom_noise').perform(context)
     if amcl_odom_noise_argument == 'auto':
-        # Gym publishes its simulated state directly as odometry. A small
-        # non-zero value retains particle diversity without pretending that
-        # this ideal odometry has the much larger error of a physical encoder.
-        amcl_odom_noise = 0.01
+        # Use the same AMCL motion model as real mode. Injecting measured
+        # encoder noise into Gym remains a separate calibration task.
+        amcl_odom_noise = 0.2
     else:
         amcl_odom_noise = float(amcl_odom_noise_argument)
         if (not math.isfinite(amcl_odom_noise)
@@ -67,6 +66,22 @@ def _launch_setup(context, config, config_dict):
             LaunchConfiguration('obstacles').perform(context)),
         'random_obstacle_seed': int(
             LaunchConfiguration('obstacle_seed').perform(context)),
+        'wheelbase': float(
+            LaunchConfiguration('wheelbase').perform(context)),
+        'vehicle_length': float(
+            LaunchConfiguration('vehicle_length').perform(context)),
+        'vehicle_width': float(
+            LaunchConfiguration('vehicle_width').perform(context)),
+        'scan_distance_to_base_link': float(LaunchConfiguration(
+            'scan_distance_to_base_link').perform(context)),
+        'max_steering_angle': float(LaunchConfiguration(
+            'max_steering_angle').perform(context)),
+        'max_steering_rate': float(LaunchConfiguration(
+            'max_steering_rate').perform(context)),
+        'steering_command_delay': float(LaunchConfiguration(
+            'steering_command_delay').perform(context)),
+        'max_acceleration': float(LaunchConfiguration(
+            'max_acceleration').perform(context)),
     }
     has_opp = parameters['num_agent'] > 1
 
@@ -123,8 +138,8 @@ def _launch_setup(context, config, config_dict):
             output='screen',
             parameters=[
                 os.path.join(
-                    get_package_share_directory('f1tenth_gym_ros'),
-                    'config', 'amcl.yaml'),
+                    get_package_share_directory('f1tenth_bringup'),
+                    'config', 'amcl_common.yaml'),
                 {
                     # A new simulation run must use the selected track start,
                     # never the pose AMCL estimated immediately before a crash.
@@ -193,6 +208,27 @@ def generate_launch_description():
             'centerline', default_value=parameters['obstacle_path_csv']),
         DeclareLaunchArgument(
             'friction', default_value=str(parameters['friction_mu'])),
+        DeclareLaunchArgument(
+            'wheelbase', default_value=str(parameters['wheelbase'])),
+        DeclareLaunchArgument(
+            'vehicle_length', default_value=str(parameters['vehicle_length'])),
+        DeclareLaunchArgument(
+            'vehicle_width', default_value=str(parameters['vehicle_width'])),
+        DeclareLaunchArgument(
+            'scan_distance_to_base_link',
+            default_value=str(parameters['scan_distance_to_base_link'])),
+        DeclareLaunchArgument(
+            'max_steering_angle',
+            default_value=str(parameters['max_steering_angle'])),
+        DeclareLaunchArgument(
+            'max_steering_rate',
+            default_value=str(parameters['max_steering_rate'])),
+        DeclareLaunchArgument(
+            'steering_command_delay',
+            default_value=str(parameters['steering_command_delay'])),
+        DeclareLaunchArgument(
+            'max_acceleration',
+            default_value=str(parameters['max_acceleration'])),
         DeclareLaunchArgument('obstacles', default_value='false'),
         DeclareLaunchArgument(
             'amcl_odom_noise',

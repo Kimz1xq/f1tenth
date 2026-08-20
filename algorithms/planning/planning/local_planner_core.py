@@ -9,6 +9,23 @@ from scipy.interpolate import CubicSpline
 QUINTIC_SMOOTHSTEP_MAX_SECOND_DERIVATIVE = 10.0 * math.sqrt(3.0) / 3.0
 
 
+def adaptive_map_endpoint_threshold(
+        clearances, base_threshold, registration_percentile,
+        registration_margin, maximum_extra):
+    """Bound the scan/map wall threshold using current registration error."""
+    values = np.asarray(clearances, dtype=float)
+    values = values[np.isfinite(values) & (values >= 0.0)]
+    base_threshold = max(0.0, float(base_threshold))
+    maximum_extra = max(0.0, float(maximum_extra))
+    if len(values) == 0:
+        return base_threshold
+    residual = float(np.percentile(
+        values, np.clip(registration_percentile, 0.0, 100.0)))
+    adaptive = residual + max(0.0, float(registration_margin))
+    return min(base_threshold + maximum_extra,
+               max(base_threshold, adaptive))
+
+
 def angle_difference(target, source):
     """Return the wrapped signed angle from source to target."""
     return math.atan2(math.sin(target - source), math.cos(target - source))

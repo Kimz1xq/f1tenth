@@ -25,6 +25,14 @@ def _launch_setup(context):
             'max_lateral_acceleration').perform(context)),
         'planning_deceleration': float(LaunchConfiguration(
             'planning_deceleration').perform(context)),
+        'vehicle_length': float(LaunchConfiguration(
+            'vehicle_length').perform(context)),
+        'vehicle_width': float(LaunchConfiguration(
+            'vehicle_width').perform(context)),
+        'wheelbase': float(LaunchConfiguration(
+            'wheelbase').perform(context)),
+        'max_steering_angle': float(LaunchConfiguration(
+            'max_steering_angle').perform(context)),
     }
     waypoint_overrides = {
         'waypoint_csv': LaunchConfiguration('waypoint_csv').perform(context),
@@ -76,5 +84,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'max_lateral_acceleration', default_value='1.50'),
         DeclareLaunchArgument('planning_deceleration', default_value='4.0'),
+        DeclareLaunchArgument('vehicle_length', default_value='0.58'),
+        DeclareLaunchArgument('vehicle_width', default_value='0.31'),
+        DeclareLaunchArgument('wheelbase', default_value='0.324'),
+        DeclareLaunchArgument('max_steering_angle', default_value='0.4189'),
         OpaqueFunction(function=_launch_setup),
     ])

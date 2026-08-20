@@ -29,6 +29,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from planning.local_planner_core import (
     ClosedPathGeometry,
     adaptive_candidate_offsets,
+    adaptive_map_endpoint_threshold,
     cluster_ordered_points,
     nearest_clustered_corridor_distance,
     minimum_surface_footprint_clearance,
@@ -66,6 +67,9 @@ class LocalObstaclePlannerNode(Node):
         self.declare_parameter('scan_transform_delay', 0.08)
         self.declare_parameter('detection_range', 3.0)
         self.declare_parameter('map_endpoint_clearance', 0.30)
+        self.declare_parameter('map_registration_percentile', 60.0)
+        self.declare_parameter('map_registration_margin', 0.08)
+        self.declare_parameter('map_registration_max_extra', 0.25)
         self.declare_parameter('cluster_gap', 0.16)
         self.declare_parameter('cluster_min_points', 8)
         self.declare_parameter('cluster_max_diameter', 0.55)
@@ -122,6 +126,12 @@ class LocalObstaclePlannerNode(Node):
             self.get_parameter('detection_range').value)
         self.map_endpoint_clearance = float(
             self.get_parameter('map_endpoint_clearance').value)
+        self.map_registration_percentile = float(
+            self.get_parameter('map_registration_percentile').value)
+        self.map_registration_margin = float(
+            self.get_parameter('map_registration_margin').value)
+        self.map_registration_max_extra = float(
+            self.get_parameter('map_registration_max_extra').value)
         self.cluster_gap = float(self.get_parameter('cluster_gap').value)
         self.cluster_min_points = int(
             self.get_parameter('cluster_min_points').value)
@@ -530,8 +540,14 @@ class LocalObstaclePlannerNode(Node):
             # to pixel-to-world rounding.  This scales with any map resolution.
             raster_tolerance = (
                 math.sqrt(2.0) * self.map_info['resolution'])
+            endpoint_threshold = adaptive_map_endpoint_threshold(
+                endpoint_clearance,
+                self.map_endpoint_clearance,
+                self.map_registration_percentile,
+                self.map_registration_margin,
+                self.map_registration_max_extra)
             unmapped_mask = endpoint_clearance > (
-                self.map_endpoint_clearance + raster_tolerance)
+                endpoint_threshold + raster_tolerance)
             for item, is_unmapped in zip(indexed_points, unmapped_mask):
                 if is_unmapped:
                     filtered.append(item)

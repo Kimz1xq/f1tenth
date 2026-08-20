@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import rclpy
@@ -79,7 +80,7 @@ class GymBridge(Node):
         self.declare_parameter('opp_ego_odom_topic', 'opp_odom')
         self.declare_parameter('opp_scan_topic', 'opp_scan')
         self.declare_parameter('opp_drive_topic', 'opp_drive')
-        self.declare_parameter('scan_distance_to_base_link', 0.275)
+        self.declare_parameter('scan_distance_to_base_link', 0.270)
         self.declare_parameter('scan_fov', 4.7)
         self.declare_parameter('scan_beams', 1080)
         self.declare_parameter(
@@ -120,8 +121,11 @@ class GymBridge(Node):
             '/simulation/obstacles_ground_truth')
         self.declare_parameter('vehicle_length', 0.58)
         self.declare_parameter('vehicle_width', 0.31)
-        self.declare_parameter('wheelbase', 0.33)
+        self.declare_parameter('wheelbase', 0.324)
         self.declare_parameter('max_steering_angle', 0.4189)
+        self.declare_parameter('max_steering_rate', 3.2)
+        self.declare_parameter('steering_command_delay', 0.12)
+        self.declare_parameter('max_acceleration', 2.5)
         self.declare_parameter('obstacle_feasibility_before', 4.0)
         self.declare_parameter('obstacle_feasibility_after', 4.0)
         self.declare_parameter('obstacle_feasibility_wall_margin', 0.02)
@@ -136,21 +140,23 @@ class GymBridge(Node):
 
         # Keep the simulator vehicle model in one place. Experiments normally
         # override only friction_mu from the bringup command.
+        wheelbase = float(self.get_parameter('wheelbase').value)
+        front_ratio = 0.15875 / (0.15875 + 0.17145)
         vehicle_params = {
             'mu': float(self.get_parameter('friction_mu').value),
             'C_Sf': 4.718,
             'C_Sr': 5.4562,
-            'lf': 0.15875,
-            'lr': 0.17145,
+            'lf': wheelbase * front_ratio,
+            'lr': wheelbase * (1.0 - front_ratio),
             'h': 0.074,
             'm': 3.74,
             'I': 0.04712,
-            's_min': -0.4189,
-            's_max': 0.4189,
-            'sv_min': -3.2,
-            'sv_max': 3.2,
+            's_min': -float(self.get_parameter('max_steering_angle').value),
+            's_max': float(self.get_parameter('max_steering_angle').value),
+            'sv_min': -float(self.get_parameter('max_steering_rate').value),
+            'sv_max': float(self.get_parameter('max_steering_rate').value),
             'v_switch': 7.319,
-            'a_max': 9.51,
+            'a_max': float(self.get_parameter('max_acceleration').value),
             'v_min': -5.0,
             'v_max': 20.0,
             'width': float(self.get_parameter('vehicle_width').value),
@@ -181,6 +187,11 @@ class GymBridge(Node):
         self.ego_speed = [0.0, 0.0, 0.0]
         self.ego_requested_speed = 0.0
         self.ego_steer = 0.0
+        self.steering_command_delay_ns = int(
+            1e9 * float(self.get_parameter('steering_command_delay').value))
+        if self.steering_command_delay_ns < 0:
+            raise ValueError('steering_command_delay must be non-negative')
+        self.pending_steering_commands = deque()
         self.ego_collision = False
         self.ego_collision_latched = False
         self.stop_vehicle_on_collision = bool(
@@ -342,7 +353,11 @@ class GymBridge(Node):
             self.ego_steer = 0.0
             return
         self.ego_requested_speed = drive_msg.drive.speed
-        self.ego_steer = drive_msg.drive.steering_angle
+        apply_at = (
+            self.get_clock().now().nanoseconds
+            + self.steering_command_delay_ns)
+        self.pending_steering_commands.append(
+            (apply_at, drive_msg.drive.steering_angle))
         self.ego_drive_published = True
 
     def opp_drive_callback(self, drive_msg):
@@ -368,6 +383,7 @@ class GymBridge(Node):
         # map, controller, and vehicle parameters remain unchanged.
         self.ego_requested_speed = 0.0
         self.ego_steer = 0.0
+        self.pending_steering_commands.clear()
         self.ego_collision = False
         self.ego_collision_latched = False
         self.ego_drive_published = False
@@ -403,6 +419,10 @@ class GymBridge(Node):
             self.ego_steer = 0.0
 
     def drive_timer_callback(self):
+        now_ns = self.get_clock().now().nanoseconds
+        while (self.pending_steering_commands
+               and self.pending_steering_commands[0][0] <= now_ns):
+            _, self.ego_steer = self.pending_steering_commands.popleft()
         if self.ego_drive_published and not self.has_opp:
             self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed]]))
         elif self.ego_drive_published and self.has_opp and self.opp_drive_published:

@@ -8,12 +8,11 @@ pure_pursuit_node:
     odom_topic: "/ego_racecar/odom"
     path_topic: "/planning/path"
 
-    sim_drive_topic: "/drive"
+    # One platform-neutral output in both modes. Gym or the onboard
+    # ackermann_mux/VESC stack performs the final actuator conversion.
+    drive_topic: "/drive"
 
-    real_speed_topic: "/commands/motor/speed"
-    real_servo_topic: "/commands/servo/position"
-
-    wheelbase: 0.33
+    wheelbase: 0.324
     lookahead_distance: 0.70
     max_steering_angle: 0.4189
     max_path_distance: 1.00
@@ -26,14 +25,6 @@ pure_pursuit_node:
     min_speed: 0.25
     max_speed: 0.80
     corner_slowdown_gain: 0.55
-
-    speed_to_erpm_gain: 3000.0
-    speed_to_erpm_offset: 0.0
-
-    servo_center: 0.5
-    servo_gain: 1.0
-    servo_min: 0.0
-    servo_max: 1.0
 
     control_rate: 30.0
     odom_timeout: 0.50

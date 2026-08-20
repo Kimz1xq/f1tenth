@@ -1,0 +1,26 @@
+vehicle:
+  # Single source of truth for controller, simulator, and hardware adapters.
+  # Values are taken from the current physical car configuration.
+  wheelbase: 0.324
+  length: 0.58
+  width: 0.31
+  laser_offset_x: 0.270
+  laser_offset_z: 0.110
+  max_steering_angle: 0.4189
+  max_steering_rate: 3.2
+  steering_command_delay: 0.12
+  max_acceleration: 2.5
+
+  # Measured/calibrated real-car conversion. Controllers never use these
+  # values directly; the real Ackermann-to-VESC adapter owns the conversion.
+  speed_to_erpm_gain: 4173.4
+  speed_to_erpm_offset: 0.0
+  steering_angle_to_servo_gain: -0.9643
+  steering_angle_to_servo_offset: 0.465
+
+simulation:
+  # This remains a configurable surface estimate, not a controller gain.
+  friction_mu: 1.0489
+  lidar_beams: 1080
+  lidar_fov: 4.7
+  lidar_max_range: 30.0

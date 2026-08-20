@@ -8,7 +8,6 @@ from rclpy.time import Time
 
 from ackermann_msgs.msg import AckermannDriveStamped
 from nav_msgs.msg import Odometry, Path
-from std_msgs.msg import Float64
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -24,11 +23,12 @@ class PurePursuitNode(Node):
         self.declare_parameter('base_frame_id', 'ego_racecar/base_link')
         self.declare_parameter('odom_topic', '/ego_racecar/odom')
         self.declare_parameter('path_topic', '/planning/path')
-        self.declare_parameter('sim_drive_topic', '/drive')
-        self.declare_parameter('real_speed_topic', '/commands/motor/speed')
-        self.declare_parameter('real_servo_topic', '/commands/servo/position')
+        # Controllers publish one platform-neutral Ackermann command in both
+        # modes. The simulator bridge or the real ackermann_mux/VESC adapter
+        # owns the final actuator conversion.
+        self.declare_parameter('drive_topic', '/drive')
 
-        self.declare_parameter('wheelbase', 0.33)
+        self.declare_parameter('wheelbase', 0.324)
         self.declare_parameter('lookahead_distance', 0.70)
         self.declare_parameter('max_steering_angle', 0.4189)
         self.declare_parameter('max_path_distance', 1.00)
@@ -41,13 +41,6 @@ class PurePursuitNode(Node):
         self.declare_parameter('max_speed', 0.80)
         self.declare_parameter('corner_slowdown_gain', 0.55)
 
-        self.declare_parameter('speed_to_erpm_gain', 3000.0)
-        self.declare_parameter('speed_to_erpm_offset', 0.0)
-        self.declare_parameter('servo_center', 0.5)
-        self.declare_parameter('servo_gain', 1.0)
-        self.declare_parameter('servo_min', 0.0)
-        self.declare_parameter('servo_max', 1.0)
-
         self.declare_parameter('control_rate', 30.0)
         self.declare_parameter('odom_timeout', 0.50)
         self.declare_parameter('path_timeout', 2.00)
@@ -59,9 +52,7 @@ class PurePursuitNode(Node):
         self.base_frame_id = self.get_parameter('base_frame_id').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.path_topic = self.get_parameter('path_topic').value
-        self.sim_drive_topic = self.get_parameter('sim_drive_topic').value
-        self.real_speed_topic = self.get_parameter('real_speed_topic').value
-        self.real_servo_topic = self.get_parameter('real_servo_topic').value
+        self.drive_topic = self.get_parameter('drive_topic').value
 
         self.wheelbase = float(self.get_parameter('wheelbase').value)
         self.lookahead_distance = float(
@@ -82,15 +73,6 @@ class PurePursuitNode(Node):
         self.max_speed = float(self.get_parameter('max_speed').value)
         self.corner_slowdown_gain = float(
             self.get_parameter('corner_slowdown_gain').value)
-
-        self.speed_to_erpm_gain = float(
-            self.get_parameter('speed_to_erpm_gain').value)
-        self.speed_to_erpm_offset = float(
-            self.get_parameter('speed_to_erpm_offset').value)
-        self.servo_center = float(self.get_parameter('servo_center').value)
-        self.servo_gain = float(self.get_parameter('servo_gain').value)
-        self.servo_min = float(self.get_parameter('servo_min').value)
-        self.servo_max = float(self.get_parameter('servo_max').value)
 
         self.odom_timeout = float(self.get_parameter('odom_timeout').value)
         self.path_timeout = float(self.get_parameter('path_timeout').value)
@@ -115,12 +97,8 @@ class PurePursuitNode(Node):
         self.create_subscription(
             Path, self.path_topic, self.path_callback, 10)
 
-        self.sim_drive_pub = self.create_publisher(
-            AckermannDriveStamped, self.sim_drive_topic, 10)
-        self.real_speed_pub = self.create_publisher(
-            Float64, self.real_speed_topic, 10)
-        self.real_servo_pub = self.create_publisher(
-            Float64, self.real_servo_topic, 10)
+        self.drive_pub = self.create_publisher(
+            AckermannDriveStamped, self.drive_topic, 10)
 
         self.enable_service = self.create_service(
             SetBool, '/control/enable', self.enable_callback)
@@ -134,8 +112,7 @@ class PurePursuitNode(Node):
                 self.global_frame_id,
                 self.base_frame_id,
                 self.path_topic,
-                self.sim_drive_topic if self.drive_mode == 'sim'
-                else self.real_speed_topic,
+                self.drive_topic,
             ))
         self.get_logger().info(
             'Start/stop: ros2 service call /control/enable '
@@ -329,43 +306,20 @@ class PurePursuitNode(Node):
         return self.clamp(speed, self.min_speed, self.max_speed)
 
     def publish_drive(self, speed, steering):
-        if self.drive_mode == 'sim':
-            msg = AckermannDriveStamped()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = self.base_frame_id
-            msg.drive.speed = float(speed)
-            msg.drive.steering_angle = float(steering)
-            self.sim_drive_pub.publish(msg)
-            return
-
-        speed_msg = Float64()
-        servo_msg = Float64()
-        speed_msg.data = (
-            self.speed_to_erpm_gain * speed + self.speed_to_erpm_offset)
-        servo_msg.data = self.clamp(
-            self.servo_center + self.servo_gain * steering,
-            self.servo_min,
-            self.servo_max,
-        )
-        self.real_speed_pub.publish(speed_msg)
-        self.real_servo_pub.publish(servo_msg)
+        msg = AckermannDriveStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.base_frame_id
+        msg.drive.speed = float(speed)
+        msg.drive.steering_angle = float(steering)
+        self.drive_pub.publish(msg)
 
     def publish_stop(self):
-        if self.drive_mode == 'sim':
-            msg = AckermannDriveStamped()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = self.base_frame_id
-            msg.drive.speed = 0.0
-            msg.drive.steering_angle = 0.0
-            self.sim_drive_pub.publish(msg)
-            return
-
-        speed_msg = Float64()
-        servo_msg = Float64()
-        speed_msg.data = 0.0
-        servo_msg.data = self.servo_center
-        self.real_speed_pub.publish(speed_msg)
-        self.real_servo_pub.publish(servo_msg)
+        msg = AckermannDriveStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.base_frame_id
+        msg.drive.speed = 0.0
+        msg.drive.steering_angle = 0.0
+        self.drive_pub.publish(msg)
 
     def warn_throttled(self, message):
         now = self.get_clock().now()
