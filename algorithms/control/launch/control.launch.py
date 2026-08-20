@@ -96,6 +96,17 @@ def _launch_setup(context):
                             'max_steering_angle').perform(context)),
                         'max_steering_rate': float(LaunchConfiguration(
                             'max_steering_rate').perform(context)),
+                        'max_lateral_acceleration': float(
+                            LaunchConfiguration(
+                                'max_lateral_acceleration').perform(context)),
+                        'max_longitudinal_acceleration': float(
+                            LaunchConfiguration(
+                                'max_longitudinal_acceleration').perform(
+                                    context)),
+                        'max_longitudinal_deceleration': float(
+                            LaunchConfiguration(
+                                'max_longitudinal_deceleration').perform(
+                                    context)),
                         'target_speed': requested_speed,
                         'max_speed': requested_speed,
                         'min_speed': min(0.25, requested_speed),

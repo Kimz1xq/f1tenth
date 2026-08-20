@@ -1,6 +1,7 @@
 import math
 
 import rclpy
+from rclpy._rclpy_pybind11 import RCLError
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -39,9 +40,10 @@ class PurePursuitNode(Node):
         # Velocity-scaled lookahead is the standard Adaptive/Regulated Pure
         # Pursuit mechanism.  Distance limits, rather than track coordinates,
         # keep the behavior portable across maps and waypoint resolutions.
-        self.declare_parameter('lookahead_time', 0.20)
+        self.declare_parameter('lookahead_time', 0.30)
         self.declare_parameter('minimum_lookahead_distance', 0.55)
-        self.declare_parameter('maximum_lookahead_distance', 2.50)
+        self.declare_parameter('maximum_lookahead_distance', 4.00)
+        self.declare_parameter('maximum_preview_heading', 0.70)
         self.declare_parameter('max_steering_angle', 0.4189)
         self.declare_parameter('max_path_distance', 1.00)
         self.declare_parameter('max_heading_error', 1.0472)
@@ -51,7 +53,16 @@ class PurePursuitNode(Node):
         self.declare_parameter('target_speed', 0.60)
         self.declare_parameter('min_speed', 0.25)
         self.declare_parameter('max_speed', 0.80)
-        self.declare_parameter('corner_slowdown_gain', 0.55)
+        self.declare_parameter('corner_slowdown_gain', 0.15)
+        # Regulated Pure Pursuit-style speed constraints.  These are physical
+        # vehicle limits, not map-specific gains: path curvature determines
+        # corner speed, while the longitudinal limits create a braking-aware
+        # speed envelope before the corner.
+        self.declare_parameter('max_lateral_acceleration', 4.0)
+        self.declare_parameter('max_longitudinal_acceleration', 2.0)
+        self.declare_parameter('max_longitudinal_deceleration', 4.0)
+        self.declare_parameter('curvature_sample_distance', 0.25)
+        self.declare_parameter('curvature_floor', 0.02)
         self.declare_parameter('use_dynamic_speed_limit', True)
         self.declare_parameter('speed_limit_timeout', 0.50)
         self.declare_parameter('max_steering_rate', 3.2)
@@ -83,6 +94,8 @@ class PurePursuitNode(Node):
             'minimum_lookahead_distance').value)
         self.maximum_lookahead_distance = float(self.get_parameter(
             'maximum_lookahead_distance').value)
+        self.maximum_preview_heading = float(self.get_parameter(
+            'maximum_preview_heading').value)
         self.max_steering_angle = float(
             self.get_parameter('max_steering_angle').value)
         self.max_path_distance = float(
@@ -99,6 +112,16 @@ class PurePursuitNode(Node):
         self.max_speed = float(self.get_parameter('max_speed').value)
         self.corner_slowdown_gain = float(
             self.get_parameter('corner_slowdown_gain').value)
+        self.max_lateral_acceleration = float(
+            self.get_parameter('max_lateral_acceleration').value)
+        self.max_longitudinal_acceleration = float(
+            self.get_parameter('max_longitudinal_acceleration').value)
+        self.max_longitudinal_deceleration = float(
+            self.get_parameter('max_longitudinal_deceleration').value)
+        self.curvature_sample_distance = float(
+            self.get_parameter('curvature_sample_distance').value)
+        self.curvature_floor = float(
+            self.get_parameter('curvature_floor').value)
         self.use_dynamic_speed_limit = bool(
             self.get_parameter('use_dynamic_speed_limit').value)
         self.speed_limit_timeout = float(
@@ -118,11 +141,27 @@ class PurePursuitNode(Node):
             raise RuntimeError('invalid lookahead distance limits')
         if self.lookahead_time < 0.0:
             raise RuntimeError('lookahead_time must be non-negative')
+        if self.maximum_preview_heading <= 0.0:
+            raise RuntimeError('maximum_preview_heading must be positive')
         if self.max_steering_rate <= 0.0:
             raise RuntimeError('max_steering_rate must be positive')
+        if self.max_lateral_acceleration <= 0.0:
+            raise RuntimeError('max_lateral_acceleration must be positive')
+        if (self.max_longitudinal_acceleration <= 0.0
+                or self.max_longitudinal_deceleration <= 0.0):
+            raise RuntimeError(
+                'longitudinal acceleration limits must be positive')
+        if self.curvature_sample_distance <= 0.0:
+            raise RuntimeError('curvature_sample_distance must be positive')
+        if self.curvature_floor < 0.0:
+            raise RuntimeError('curvature_floor must be non-negative')
 
         self.current_odom = None
         self.current_path = None
+        self.path_points = []
+        self.path_segment_lengths = []
+        self.path_curvatures = []
+        self.path_length = 0.0
         self.last_odom_time = None
         self.last_path_time = None
         self.nearest_index = None
@@ -131,6 +170,7 @@ class PurePursuitNode(Node):
         self.dynamic_speed_limit = None
         self.last_speed_limit_time = None
         self.previous_steering = 0.0
+        self.previous_speed_command = 0.0
         self.control_dt = 1.0 / max(control_rate, 1.0)
         self.last_status_message = None
         self.last_status_time = None
@@ -162,12 +202,13 @@ class PurePursuitNode(Node):
 
         self.get_logger().info(
             'Pure Pursuit ready (enabled=%s, pose=%s -> %s, path=%s, '
-            'drive=%s)' % (
+            'drive=%s, a_lat=%.2fm/s^2)' % (
                 self.enabled,
                 self.global_frame_id,
                 self.base_frame_id,
                 self.path_topic,
                 self.drive_topic,
+                self.max_lateral_acceleration,
             ))
         self.get_logger().info(
             'Start/stop: ros2 service call /control/enable '
@@ -183,7 +224,61 @@ class PurePursuitNode(Node):
         if self.current_path is None or len(self.current_path.poses) != len(msg.poses):
             self.nearest_index = None
         self.current_path = msg
+        self.update_path_geometry(msg)
         self.last_path_time = self.get_clock().now()
+
+    @staticmethod
+    def circle_curvature(first, middle, last):
+        """Return unsigned curvature of the circle through three XY points."""
+        a = math.dist(first, middle)
+        b = math.dist(middle, last)
+        c = math.dist(first, last)
+        denominator = a * b * c
+        if denominator < 1e-9:
+            return 0.0
+        twice_area = abs(
+            (middle[0] - first[0]) * (last[1] - first[1])
+            - (middle[1] - first[1]) * (last[0] - first[0]))
+        return 2.0 * twice_area / denominator
+
+    def update_path_geometry(self, msg):
+        """Cache density-independent path geometry for speed regulation."""
+        self.path_points = [
+            (pose.pose.position.x, pose.pose.position.y)
+            for pose in msg.poses
+        ]
+        count = len(self.path_points)
+        if count < 3:
+            self.path_segment_lengths = []
+            self.path_curvatures = []
+            self.path_length = 0.0
+            return
+
+        self.path_segment_lengths = [
+            math.dist(self.path_points[index],
+                      self.path_points[(index + 1) % count])
+            for index in range(count)
+        ]
+        self.path_length = sum(self.path_segment_lengths)
+        nonzero = sorted(
+            length for length in self.path_segment_lengths
+            if length > 1e-4)
+        median_spacing = (
+            nonzero[len(nonzero) // 2] if nonzero else 0.05)
+        stride = max(
+            1,
+            int(round(
+                0.5 * self.curvature_sample_distance
+                / max(median_spacing, 1e-4))),
+        )
+        self.path_curvatures = [
+            self.circle_curvature(
+                self.path_points[(index - stride) % count],
+                self.path_points[index],
+                self.path_points[(index + stride) % count],
+            )
+            for index in range(count)
+        ]
 
     def emergency_stop_callback(self, msg):
         self.emergency_stop = bool(msg.data)
@@ -204,6 +299,7 @@ class PurePursuitNode(Node):
             self.enabled = False
             self.nearest_index = None
             self.previous_steering = 0.0
+            self.previous_speed_command = 0.0
             self.publish_stop()
             response.success = True
             response.message = 'Pure Pursuit stopped'
@@ -262,6 +358,7 @@ class PurePursuitNode(Node):
 
         self.enabled = True
         self.previous_steering = 0.0
+        self.previous_speed_command = self.measured_speed()
         response.success = True
         response.message = 'Pure Pursuit enabled'
         self.get_logger().info(response.message)
@@ -311,11 +408,21 @@ class PurePursuitNode(Node):
 
     def active_lookahead_distance(self):
         scaled = self.lookahead_distance + self.lookahead_time * self.measured_speed()
-        return self.clamp(
+        lookahead = self.clamp(
             scaled,
             self.minimum_lookahead_distance,
             self.maximum_lookahead_distance,
         )
+        if (self.nearest_index is not None and self.path_curvatures):
+            curvature = self.path_curvatures[self.nearest_index]
+            if curvature > self.curvature_floor:
+                curvature_limited = (
+                    self.maximum_preview_heading / curvature)
+                lookahead = max(
+                    self.minimum_lookahead_distance,
+                    min(lookahead, curvature_limited),
+                )
+        return lookahead
 
     def candidate_indices(self, count):
         if self.nearest_index is None:
@@ -390,10 +497,64 @@ class PurePursuitNode(Node):
         return self.clamp(
             steering, -self.max_steering_angle, self.max_steering_angle)
 
+    def curvature_speed_limit(self, steering):
+        """Return a braking-aware speed limit from upcoming path curvature."""
+        if (self.nearest_index is None
+                or not self.path_curvatures
+                or not self.path_segment_lengths):
+            return self.target_speed
+
+        steering_curvature = abs(math.tan(steering) / self.wheelbase)
+        if steering_curvature > self.curvature_floor:
+            speed_limit = math.sqrt(
+                self.max_lateral_acceleration / steering_curvature)
+        else:
+            speed_limit = self.target_speed
+
+        # A speed request is feasible only if the vehicle can decelerate to
+        # every upcoming curvature limit before reaching it.  One theoretical
+        # braking distance is sufficient and remains independent of track
+        # coordinates and waypoint density.
+        preview_distance = min(
+            self.path_length,
+            self.target_speed ** 2
+            / (2.0 * self.max_longitudinal_deceleration),
+        )
+        travelled = 0.0
+        count = len(self.path_curvatures)
+        for offset in range(count):
+            index = (self.nearest_index + offset) % count
+            curvature = self.path_curvatures[index]
+            if curvature > self.curvature_floor:
+                corner_speed = math.sqrt(
+                    self.max_lateral_acceleration / curvature)
+                allowed_now = math.sqrt(
+                    corner_speed ** 2
+                    + 2.0 * self.max_longitudinal_deceleration * travelled)
+                speed_limit = min(speed_limit, allowed_now)
+            travelled += self.path_segment_lengths[index]
+            if travelled >= preview_distance:
+                break
+        return min(self.target_speed, speed_limit)
+
+    def rate_limit_speed(self, requested):
+        lower = max(
+            0.0,
+            self.previous_speed_command
+            - self.max_longitudinal_deceleration * self.control_dt,
+        )
+        upper = (
+            self.previous_speed_command
+            + self.max_longitudinal_acceleration * self.control_dt)
+        command = self.clamp(requested, lower, upper)
+        self.previous_speed_command = command
+        return command
+
     def compute_speed(self, steering):
         steer_ratio = abs(steering) / max(self.max_steering_angle, 1e-6)
         speed = self.target_speed * (
             1.0 - self.corner_slowdown_gain * steer_ratio)
+        speed = min(speed, self.curvature_speed_limit(steering))
         speed = self.clamp(speed, self.min_speed, self.max_speed)
         if (self.avoidance_active
                 and self.use_dynamic_speed_limit
@@ -401,7 +562,7 @@ class PurePursuitNode(Node):
                 and self.age_seconds(self.last_speed_limit_time)
                 <= self.speed_limit_timeout):
             speed = min(speed, self.dynamic_speed_limit)
-        return max(0.0, speed)
+        return self.rate_limit_speed(max(0.0, speed))
 
     def publish_drive(self, speed, steering):
         msg = AckermannDriveStamped()
@@ -418,6 +579,7 @@ class PurePursuitNode(Node):
         msg.drive.speed = 0.0
         msg.drive.steering_angle = 0.0
         self.drive_pub.publish(msg)
+        self.previous_speed_command = 0.0
 
     def rate_limit_steering(self, requested):
         maximum_delta = self.max_steering_rate * self.control_dt
@@ -479,7 +641,7 @@ def main(args=None):
     node = PurePursuitNode()
     try:
         rclpy.spin(node)
-    except (KeyboardInterrupt, ExternalShutdownException):
+    except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass
     finally:
         try:
@@ -488,7 +650,7 @@ def main(args=None):
             node.destroy_node()
             if rclpy.ok():
                 rclpy.shutdown()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, RCLError):
             pass
 
 
