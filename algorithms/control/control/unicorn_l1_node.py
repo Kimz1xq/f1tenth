@@ -465,7 +465,16 @@ class UnicornL1Node(Node):
         best = None
         best_forward = None
         count = len(self.path_points)
-        indices = self.candidate_indices() if update_index else range(count)
+        # Once progress on the closed path is known, both the current pose and
+        # UNICORN's short future projection must remain near that progress.
+        # Searching every segment for the future pose made control cost scale
+        # with the complete circuit length and could starve Scan/TF callbacks
+        # on large tracks.  Retain the full search only for initialization;
+        # thereafter use the same bounded, wrap-aware progress window.
+        indices = (
+            self.candidate_indices()
+            if self.nearest_index is not None
+            else range(count))
         for index in indices:
             segment = (
                 self.path_points[(index + 1) % count]

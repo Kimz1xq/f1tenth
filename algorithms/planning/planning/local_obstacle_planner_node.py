@@ -65,6 +65,8 @@ class LocalObstaclePlannerNode(Node):
         self.declare_parameter('base_frame_id', 'ego_racecar/base_link')
         self.declare_parameter('planning_rate', 5.0)
         self.declare_parameter('scan_process_rate', 10.0)
+        self.declare_parameter('path_heartbeat_rate', 2.0)
+        self.declare_parameter('marker_publish_rate', 5.0)
         self.declare_parameter('scan_transform_delay', 0.08)
         self.declare_parameter('detection_range', 3.0)
         self.declare_parameter('map_endpoint_clearance', 0.30)
@@ -233,6 +235,10 @@ class LocalObstaclePlannerNode(Node):
         self.scan_timeout = float(self.get_parameter('scan_timeout').value)
         self.scan_process_period = 1.0 / max(
             float(self.get_parameter('scan_process_rate').value), 1.0)
+        self.path_heartbeat_period = 1.0 / max(
+            float(self.get_parameter('path_heartbeat_rate').value), 0.1)
+        self.marker_publish_period = 1.0 / max(
+            float(self.get_parameter('marker_publish_rate').value), 0.1)
         self.scan_transform_delay = float(
             self.get_parameter('scan_transform_delay').value)
         self.maximum_planning_speed = float(
@@ -263,6 +269,9 @@ class LocalObstaclePlannerNode(Node):
         self.tracked_obstacles = []
         self.next_obstacle_id = 0
         self.last_safe_path = None
+        self.last_published_path = None
+        self.last_path_publish_time = None
+        self.last_marker_publish_time = None
         self.last_status = ''
         self.locked_obstacle_id = None
         self.locked_offset = None
@@ -808,8 +817,30 @@ class LocalObstaclePlannerNode(Node):
         self.speed_limit_pub.publish(message)
 
     def publish_path(self, points):
+        """Publish path changes immediately and unchanged paths as heartbeat.
+
+        A long raceline can contain thousands of poses. Rebuilding and
+        serializing the identical Path at the planning rate consumes enough
+        CPU to delay LaserScan and TF processing. The heartbeat keeps
+        controller freshness checks valid, while an avoidance-path change is
+        still delivered in the same planning cycle.
+        """
+        points = np.asarray(points, dtype=float)
+        now = self.get_clock().now()
+        changed = (
+            self.last_published_path is None
+            or self.last_published_path.shape != points.shape
+            or np.max(np.abs(
+                self.last_published_path - points), initial=0.0) > 1e-6)
+        heartbeat_due = (
+            self.last_path_publish_time is None
+            or (now - self.last_path_publish_time).nanoseconds * 1e-9
+            >= self.path_heartbeat_period)
+        if not changed and not heartbeat_due:
+            return False
+
         message = Path()
-        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.stamp = now.to_msg()
         message.header.frame_id = self.global_frame
         for index, point in enumerate(points):
             next_point = points[(index + 1) % len(points)]
@@ -823,10 +854,23 @@ class LocalObstaclePlannerNode(Node):
             pose.pose.orientation.w = math.cos(0.5 * yaw)
             message.poses.append(pose)
         self.path_pub.publish(message)
+        self.last_published_path = points.copy()
+        self.last_path_publish_time = now
+        return True
 
     def publish_markers(self, selected_path, active_obstacles):
+        # Markers are diagnostic only. Avoid serializing a full raceline at
+        # the control/planning rate, and do no work when RViz is not attached.
+        if self.marker_pub.get_subscription_count() == 0:
+            return
+        now = self.get_clock().now()
+        if (self.last_marker_publish_time is not None
+                and (now - self.last_marker_publish_time).nanoseconds * 1e-9
+                < self.marker_publish_period):
+            return
+        self.last_marker_publish_time = now
         marker_array = MarkerArray()
-        stamp = self.get_clock().now().to_msg()
+        stamp = now.to_msg()
 
         delete_all = Marker()
         delete_all.action = Marker.DELETEALL

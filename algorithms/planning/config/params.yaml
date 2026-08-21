@@ -25,6 +25,10 @@ local_obstacle_planner_node:
     # 20 Hz halves avoidance latency without processing every laser packet.
     planning_rate: 20.0
     scan_process_rate: 20.0
+    # Publish changed avoidance paths immediately. Identical long paths only
+    # need a heartbeat for controller freshness; RViz diagnostics are slower.
+    path_heartbeat_rate: 2.0
+    marker_publish_rate: 5.0
     scan_transform_delay: 0.08
 
     detection_range: 6.0
