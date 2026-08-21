@@ -28,10 +28,14 @@ local_obstacle_planner_node:
     scan_transform_delay: 0.08
 
     detection_range: 6.0
-    # Ignore small map/scan registration residuals near mapped walls.
-    map_endpoint_clearance: 0.36
+    # Ignore map/scan registration residuals near mapped walls. process_scan()
+    # separately adds one diagonal 0.05 m map cell (~0.071 m) as raster
+    # tolerance.  A 0.12 m baseline therefore gives an effective nominal gate
+    # near 0.19 m without hiding a compact obstacle close to a mapped wall.
+    # The percentile still expands it automatically when registration worsens.
+    map_endpoint_clearance: 0.12
     map_registration_percentile: 60.0
-    map_registration_margin: 0.08
+    map_registration_margin: 0.04
     map_registration_max_extra: 0.25
     cluster_gap: 0.16
     cluster_min_points: 10

@@ -141,6 +141,7 @@ results/*_bag/
 
 # Raw experiment outputs. Keep only reviewed plots/tables in results/.
 runs/
+algorithms/control/results/*.csv
 
 # Local map-editing sources and reference documents
 *.xcf

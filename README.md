@@ -51,8 +51,8 @@ source install/setup.bash
 
 cd /sim_ws/src/f1tenth_gym_ros
 ./run_autonomy.sh \
-  mode:=sim track:=track03 controller:=unicorn_l1 \
-  speed:=3.0 maximum_speed:=20.0 \
+  mode:=sim track:=track03 controller:=pure_pursuit \
+  speed:=5.0 maximum_speed:=20.0 \
   obstacles:=true obstacle_seed:=-1 rviz:=true
 ```
 
@@ -87,7 +87,7 @@ ros2 launch f1tenth_stack bringup_launch.py
 ```bash
 cd /home/misys/shared_dir
 ./run_autonomy.sh \
-  mode:=real track:=track03 controller:=unicorn_l1 \
+  mode:=real track:=track03 controller:=pure_pursuit \
   speed:=1.0 maximum_speed:=20.0
 ```
 
@@ -124,6 +124,27 @@ mpcc           contour/lag error 기반 nonlinear MPCC
 UNICORN L1과 ForzaETH MAP은 MPC가 아닙니다. 먼저 PP 계열을 기준선으로
 검증하고 같은 map/raceline/speed/obstacle seed에서 CTE, lap time, 충돌,
 AEB 횟수를 비교합니다.
+
+참고 구현은 [F1TENTH Adaptive Pure Pursuit](https://github.com/f1tenth-dev/pure_pursuit),
+[UNICORN Racing Stack](https://github.com/HMCL-UNIST/unicorn-racing-stack),
+[ForzaETH Race Stack](https://github.com/ForzaETH/race_stack)입니다. 이 저장소는
+해당 저장소 전체를 복사하지 않고 ROS 2 Humble 공통 입출력 규약에 맞춘
+어댑터와 필요한 제어 전략만 유지합니다.
+
+## 현재 재현 기준선
+
+`track03`, 실차와 같은 0.12초 조향 지연·2.5 m/s² 가속 제한, Pure Pursuit
+조건에서 확인한 값입니다.
+
+| 조건 | 결과 | 실제 최고속도 | emergency stop |
+|---|---:|---:|---:|
+| 요청 5.0 m/s, 장애물 없음, 2랩 | PASS | 4.22 m/s | 0.00 s |
+| 요청 5.0 m/s, 정적 장애물 2개/랩, 3랩 | PASS | 3.29 m/s | 0.89 s |
+
+장애물은 seed 42에서 시작해 랩마다 43, 44로 재배치했습니다. 이 결과는
+충돌 없는 기준선이며 고속 회피 튜닝 완료를 뜻하지 않습니다. `track03`은
+약 23 m의 짧고 굽은 코스이므로 10 m/s 성능을 검증하기에는 부적합합니다.
+더 높은 속도는 대회 크기 맵에서 같은 검증 절차로 확인해야 합니다.
 
 ## Sim-to-real 검증
 
